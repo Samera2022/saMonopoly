@@ -1,0 +1,13 @@
+{
+  "id": "classic-pack",
+  "version": "0.1.0",
+  "board": {
+    "mapName": "Classic",
+    "tiles": [
+      { "id": "start", "name": "Start", "kind": "Start" },
+      { "id": "property_1", "name": "Property 1", "kind": "OrdinaryProperty" },
+      { "id": "opportunity_1", "name": "Opportunity", "kind": "Chance" },
+      { "id": "bank_1", "name": "Bank", "kind": "Bank" }
+    ]
+  }
+}

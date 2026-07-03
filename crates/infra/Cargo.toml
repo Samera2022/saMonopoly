@@ -1,0 +1,15 @@
+[package]
+name = "sa-monopoly-infra"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json = "1"
+thiserror.workspace = true
+sa-monopoly-domain = { path = "../domain" }
+sa-monopoly-application = { path = "../application" }
+
+# Optional scripting backends
+mlua = { version = "0.10", features = ["vendored"], optional = true }

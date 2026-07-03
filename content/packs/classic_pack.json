@@ -1,0 +1,46 @@
+{
+  "id": "classic-pack",
+  "version": "0.1.0",
+  "maps": [
+    {
+      "id": "classic",
+      "version": "0.1.0",
+      "name_key": "map.classic.name",
+      "tiles": [
+        {
+          "id": "start",
+          "name_key": "tile.start",
+          "tile_type": "Start",
+          "attributes": {}
+        },
+        {
+          "id": "opportunity_1",
+          "name_key": "tile.opportunity_1",
+          "tile_type": "Chance",
+          "attributes": {}
+        },
+        {
+          "id": "property_1",
+          "name_key": "tile.property_1",
+          "tile_type": "OrdinaryProperty",
+          "attributes": {
+            "price": 100,
+            "rent": [10, 20, 30]
+          }
+        },
+        {
+          "id": "bank_1",
+          "name_key": "tile.bank_1",
+          "tile_type": "Bank",
+          "attributes": {}
+        }
+      ],
+      "rules": {
+        "allow_custom_topology": true,
+        "allow_stock_market": true,
+        "allow_lottery": true,
+        "allow_card_system": true
+      }
+    }
+  ]
+}

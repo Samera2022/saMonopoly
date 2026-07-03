@@ -1,0 +1,10 @@
+{
+  "id": "classic",
+  "version": "0.1.0",
+  "name_key": "map.classic.name",
+  "tiles": [
+    { "id": "start", "name_key": "tile.start", "tile_type": "start" },
+    { "id": "property_1", "name_key": "tile.property_1", "tile_type": "ordinary_property" },
+    { "id": "opportunity_1", "name_key": "tile.opportunity_1", "tile_type": "special_property" }
+  ]
+}

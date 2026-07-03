@@ -1,0 +1,18 @@
+name: sa_monopoly
+description: Cross-platform Monopoly game shell.
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.5.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/i18n/
+    - assets/content/classic_pack.json
