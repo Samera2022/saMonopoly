@@ -177,42 +177,37 @@ class IsometricBoardPainter extends CustomPainter {
   }
 
   void _drawTile(Canvas canvas, BoardTileViewModel tile, Offset center, Color? ownerColor) {
-    final hw = tileWidth / 2;
-    final hh = tileHeight / 2;
+    final hw = tileWidth / 2;   // half tile width (grid step = tileW/2)
+    final hh = tileHeight / 4;  // half tile height (grid step = tileH/4)
 
-    // Isometric tile rhombus: diamond shape with the 4 corners
-    final path = Path()
-      ..moveTo(center.dx, center.dy - hh)           // top
-      ..lineTo(center.dx + hw, center.dy - hh / 2) // right (shifted for depth)
-      ..lineTo(center.dx, center.dy + hh)           // bottom
-      ..lineTo(center.dx - hw, center.dy - hh / 2) // left
+    // Proper isometric diamond tile.
+    // The 4 vertices from center: top(0,-hh), right(+hw,0), bottom(0,+hh), left(-hw,0)
+    // This ensures adjacent tiles meet exactly at edges without gaps or overlaps.
+    final diamond = Path()
+      ..moveTo(center.dx, center.dy - hh)         // top
+      ..lineTo(center.dx + hw, center.dy)          // right
+      ..lineTo(center.dx, center.dy + hh)          // bottom
+      ..lineTo(center.dx - hw, center.dy)          // left
       ..close();
 
-    // For isometric with depth, use a more traditional approach:
-    // Simple flat rhombus
-    final flatPath = Path()
-      ..moveTo(center.dx, center.dy - hh)
-      ..lineTo(center.dx + hw * 0.8, center.dy)
-      ..lineTo(center.dx, center.dy + hh)
-      ..lineTo(center.dx - hw * 0.8, center.dy)
-      ..close();
+    // Fill with tile kind color
+    canvas.drawPath(diamond, Paint()..color = tile.color.withOpacity(0.5));
 
-    final fillColor = tile.color.withOpacity(0.5);
-    canvas.drawPath(flatPath, Paint()..color = fillColor);
-    canvas.drawPath(flatPath, Paint()
+    // Border
+    canvas.drawPath(diamond, Paint()
       ..color = Colors.black26
       ..style = PaintingStyle.stroke
       ..strokeWidth = 0.5);
 
-    // Ownership color strip (bottom half fill)
+    // Ownership color strip (lower half of diamond)
     if (ownerColor != null && (tile.kind == 'OrdinaryProperty' || tile.kind == 'SpecialProperty')) {
-      final ownerPath = Path()
-        ..moveTo(center.dx, center.dy)
-        ..lineTo(center.dx + hw * 0.8, center.dy)
-        ..lineTo(center.dx, center.dy + hh)
-        ..lineTo(center.dx - hw * 0.8, center.dy)
+      final ownerDiamond = Path()
+        ..moveTo(center.dx, center.dy)             // center
+        ..lineTo(center.dx + hw, center.dy)         // right
+        ..lineTo(center.dx, center.dy + hh)         // bottom
+        ..lineTo(center.dx - hw, center.dy)         // left
         ..close();
-      canvas.drawPath(ownerPath, Paint()..color = ownerColor.withOpacity(0.6));
+      canvas.drawPath(ownerDiamond, Paint()..color = ownerColor.withOpacity(0.6));
     }
   }
 
@@ -337,7 +332,7 @@ class MinimapPainter extends CustomPainter {
     }
 
     final hw = tileWidth / 2;
-    final hh = tileHeight / 2;
+    final hh = tileHeight / 4;
 
     for (final entry in positions.entries) {
       final ti = entry.key;
@@ -349,12 +344,12 @@ class MinimapPainter extends CustomPainter {
       final center = gridToIso(row, col, tileWidth, tileHeight);
       final ownerColor = ownerColors[tile.id];
 
-      // Draw tile as small rhombus
+      // Draw tile as proper isometric diamond
       final path = Path()
         ..moveTo(center.dx, center.dy - hh)
-        ..lineTo(center.dx + hw * 0.8, center.dy)
+        ..lineTo(center.dx + hw, center.dy)
         ..lineTo(center.dx, center.dy + hh)
-        ..lineTo(center.dx - hw * 0.8, center.dy)
+        ..lineTo(center.dx - hw, center.dy)
         ..close();
 
       if (ownerColor != null) {
