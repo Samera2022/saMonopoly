@@ -5,6 +5,11 @@ on:
     tags:
       - '[0-9]*'
   workflow_dispatch:
+    inputs:
+      test_version:
+        description: 'Test version (leave empty to auto-detect from commit/tag)'
+        required: false
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -22,7 +27,13 @@ jobs:
         id: version
         shell: bash
         run: |
-          if [ "${{ github.ref_type }}" = "tag" ]; then
+          # Priority: workflow_dispatch test_version > tag > commit message
+          TEST_VERSION="${{ github.event.inputs.test_version }}"
+          if [ -n "$TEST_VERSION" ]; then
+            echo "Triggered by workflow_dispatch with test_version: $TEST_VERSION"
+            VERSION="$TEST_VERSION"
+            echo "dry_run=true" >> $GITHUB_OUTPUT
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
             TAG_NAME="${{ github.ref_name }}"
             echo "Triggered by tag: $TAG_NAME"
             if [[ "$TAG_NAME" =~ ^[vV]?([0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+)?)$ ]]; then
@@ -32,6 +43,7 @@ jobs:
               echo "is_release=false" >> $GITHUB_OUTPUT
               exit 0
             fi
+            echo "dry_run=false" >> $GITHUB_OUTPUT
           else
             COMMIT_MSG="${{ github.event.head_commit.message }}"
             echo "Triggered by commit: $COMMIT_MSG"
@@ -42,9 +54,17 @@ jobs:
               echo "is_release=false" >> $GITHUB_OUTPUT
               exit 0
             fi
+            echo "dry_run=false" >> $GITHUB_OUTPUT
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "is_release=true" >> $GITHUB_OUTPUT
+
+      - name: Show resolved config
+        if: steps.version.outputs.is_release == 'true'
+        run: |
+          echo "Version: ${{ steps.version.outputs.version }}"
+          echo "Dry run: ${{ steps.version.outputs.dry_run }}"
+          echo "Is release: ${{ steps.version.outputs.is_release }}"
 
   # ── Step 2: Build on all platforms ───────────────────────────────────────
   build:
@@ -161,7 +181,17 @@ jobs:
             mkdir -p artifacts
           fi
 
+      - name: Preview release body (dry-run or actual)
+        run: |
+          echo "=== Release body preview ==="
+          cat release_body.txt
+          echo ""
+          echo "=== Files to attach ==="
+          find artifacts -type f 2>/dev/null || echo "(no artifacts)"
+          echo "=========================="
+
       - name: Publish Release
+        if: needs.detect.outputs.dry_run != 'true'
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ needs.detect.outputs.version }}
