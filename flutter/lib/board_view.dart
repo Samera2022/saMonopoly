@@ -196,11 +196,6 @@ class BoardPainter extends CustomPainter {
     //   Side 2 (top):     right-to-left
     //   Side 3 (left):    top-to-bottom
 
-    struct TileLayout {
-      final Rect rect;
-      final double rotation; // radians
-    }
-
     final layouts = <TileLayout>[];
     var tileIdx = 0;
 
