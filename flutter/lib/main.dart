@@ -7,6 +7,7 @@ import 'board_view.dart';
 import 'bridge_client.dart';
 import 'content_pack.dart';
 import 'content_pack_loader.dart';
+import 'isometric_board.dart';
 
 // ============================================================================
 // Game state management (simple InheritedWidget)
@@ -314,6 +315,18 @@ class _GameScreenState extends State<GameScreen> {
 
   int _playerIndex(String playerId) {
     return int.tryParse(playerId.replaceAll('player_', '')) ?? 0;
+  }
+
+  Color _playerColorForOwner(String playerId) {
+    final playerColors = [
+      const Color(0xFFD32F2F),
+      const Color(0xFF1976D2),
+      const Color(0xFF388E3C),
+      const Color(0xFFFBC02D),
+      const Color(0xFF8E24AA),
+      const Color(0xFFFF6F00),
+    ];
+    return playerColors[_playerIndex(playerId) % playerColors.length];
   }
 
   void _addLog(String message) {
@@ -896,13 +909,33 @@ class _GameScreenState extends State<GameScreen> {
         body: SafeArea(
           child: Row(
             children: [
-              // ---- Board (left side, takes most space) ---------------------
+              // ---- Isometric Board (left side) ------------------------------
               Expanded(
                 flex: 3,
                 child: Padding(
                   padding: const EdgeInsets.all(4),
-                  child: BoardWidget(
-                    viewModel: boardViewModel,
+                  child: Stack(
+                    children: [
+                      IsometricBoardWidget(
+                        viewModel: boardViewModel,
+                      ),
+                      // Minimap overlay
+                      Positioned(
+                        top: 4,
+                        right: 4,
+                        child: MinimapWidget(
+                          viewModel: boardViewModel,
+                          gridSize: tiles.length >= 4
+                              ? ((tiles.length - 4) ~/ 4) + 2
+                              : 11,
+                          tileWidth: 60,
+                          tileHeight: 60,
+                          ownerColors: propertyOwners.map(
+                            (k, v) => MapEntry(k, _playerColorForOwner(v)),
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),
