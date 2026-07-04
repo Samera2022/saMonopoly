@@ -131,6 +131,12 @@ const double _kTokenRadius = 0.12;
 const double _kFontSize = 0.12;
 const double _kPropertyColorStrip = 0.25;
 
+class TileLayout {
+  final Rect rect;
+  final double rotation;
+  TileLayout(this.rect, this.rotation);
+}
+
 class BoardPainter extends CustomPainter {
   final BoardViewModel viewModel;
 
@@ -207,7 +213,7 @@ class BoardPainter extends CustomPainter {
       if (side == 0) {
         // Bottom-left corner
         final cl = _cornerLayout(originX, originY + sideLength - cornerSize,
-            cornerSize, side, false);
+            sideLength, cornerSize, side, false);
         layouts.add(cl);
         tileIdx++;
       }
