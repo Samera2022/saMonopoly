@@ -134,7 +134,7 @@ const double _kPropertyColorStrip = 0.25;
 class TileLayout {
   final Rect rect;
   final double rotation;
-  TileLayout(this.rect, this.rotation);
+  TileLayout({required this.rect, required this.rotation});
 }
 
 class BoardPainter extends CustomPainter {
