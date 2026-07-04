@@ -33,7 +33,7 @@ void main() {
 
     // Tap the settings icon.
     await tester.tap(find.byIcon(Icons.settings));
-    await tester.pumpAndSettle();
+    await tester.pump();
 
     // The settings dialog should appear.
     expect(find.text('Game Settings'), findsOneWidget);
@@ -41,7 +41,7 @@ void main() {
 
     // Tap "Start Game" to restart with the same settings.
     await tester.tap(find.text('Start Game'));
-    await tester.pumpAndSettle();
+    await tester.pump();
 
     // After restarting, the game board should still be visible.
     expect(find.text('saMonopoly'), findsOneWidget);
