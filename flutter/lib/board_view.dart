@@ -164,31 +164,35 @@ class BoardWidget extends StatelessWidget {
     final cellSize = boardSize / gridSize;
 
     // Map tile index -> grid (row, col)
+    //
+    // The board perimeter has 4*(gridSize-1) cells.  We allocate:
+    //   bottom: gridSize cols (includes both BL & BR corners)
+    //   right:  gridSize-1 rows (excludes BR corner already placed)
+    //   top:    gridSize-1 cols (excludes TR corner already placed)
+    //   left:   gridSize-2 rows (excludes TL & BL corners already placed)
     final positions = <int, int>{}; // tileIdx -> gridIndex (row * gridSize + col)
     int tileIdx = 0;
 
     // Bottom row (side 0): row = gridSize-1, col = 0..gridSize-1
-    // Corner BL at (gridSize-1, 0)
-    for (var i = 0; i <= tilesPerSide; i++) {
+    for (var i = 0; i < gridSize; i++) {
       positions[tileIdx] = (gridSize - 1) * gridSize + i;
       tileIdx++;
     }
 
-    // Right column (side 1): col = gridSize-1, row = gridSize-2 down to 1
-    for (var i = 0; i < tilesPerSide; i++) {
+    // Right column (side 1): col = gridSize-1, row = gridSize-2 down to 0
+    for (var i = 0; i < gridSize - 1; i++) {
       positions[tileIdx] = (gridSize - 2 - i) * gridSize + (gridSize - 1);
       tileIdx++;
     }
 
-    // Top row (side 2): row = 0, col = gridSize-1 down to 0
-    // Corner BR already placed, so start from gridSize-2 down to 0
-    for (var i = 0; i <= tilesPerSide; i++) {
-      positions[tileIdx] = 0 * gridSize + (gridSize - 1 - i);
+    // Top row (side 2): row = 0, col = gridSize-2 down to 0
+    for (var i = 0; i < gridSize - 1; i++) {
+      positions[tileIdx] = 0 * gridSize + (gridSize - 2 - i);
       tileIdx++;
     }
 
     // Left column (side 3): col = 0, row = 1 up to gridSize-2
-    for (var i = 0; i < tilesPerSide; i++) {
+    for (var i = 0; i < gridSize - 2; i++) {
       positions[tileIdx] = (1 + i) * gridSize + 0;
       tileIdx++;
     }

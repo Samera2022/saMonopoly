@@ -102,23 +102,28 @@ class IsometricBoardPainter extends CustomPainter {
       return;
     }
 
-    // Compute tile-to-grid position mapping (same logic as before)
-    final tilesPerSide = (tiles.length - 4) ~/ 4;
-    final positions = <int, int>{}; // tileIdx → gridIndex (r,gSize,c)
+    // Compute tile-to-grid position mapping
+    //
+    // The board perimeter has 4*(gridSize-1) cells.  We allocate:
+    //   bottom: gridSize cols (includes both BL & BR corners)
+    //   right:  gridSize-1 rows (excludes BR corner already placed)
+    //   top:    gridSize-1 cols (excludes TR corner already placed)
+    //   left:   gridSize-2 rows (excludes TL & BL corners already placed)
+    final positions = <int, int>{}; // tileIdx → gridIndex (r*gSize + c)
     int tileIdx = 0;
-    for (var i = 0; i <= tilesPerSide; i++) {
+    for (var i = 0; i < gridSize; i++) {
       positions[tileIdx] = (gridSize - 1) * gridSize + i;
       tileIdx++;
     }
-    for (var i = 0; i < tilesPerSide; i++) {
+    for (var i = 0; i < gridSize - 1; i++) {
       positions[tileIdx] = (gridSize - 2 - i) * gridSize + (gridSize - 1);
       tileIdx++;
     }
-    for (var i = 0; i <= tilesPerSide; i++) {
-      positions[tileIdx] = 0 * gridSize + (gridSize - 1 - i);
+    for (var i = 0; i < gridSize - 1; i++) {
+      positions[tileIdx] = 0 * gridSize + (gridSize - 2 - i);
       tileIdx++;
     }
-    for (var i = 0; i < tilesPerSide; i++) {
+    for (var i = 0; i < gridSize - 2; i++) {
       positions[tileIdx] = (1 + i) * gridSize + 0;
       tileIdx++;
     }
@@ -161,7 +166,7 @@ class IsometricBoardPainter extends CustomPainter {
       _drawPlayers(canvas, players, center);
     }
 
-    // Draw tile texts on top (front-most)
+    // Draw tile texts on top (front-most) — along inner edges
     for (final ti in tileIndices) {
       if (ti >= tiles.length) continue;
       final pos = positions[ti];
@@ -170,7 +175,7 @@ class IsometricBoardPainter extends CustomPainter {
       final col = pos % gridSize;
       final tile = tiles[ti];
       final center = gridToIso(row, col, tileWidth, tileHeight);
-      _drawTileName(canvas, tile, center);
+      _drawTileName(canvas, tile, center, row, col, gridSize);
     }
 
     canvas.restore();
@@ -211,17 +216,19 @@ class IsometricBoardPainter extends CustomPainter {
     }
   }
 
-  void _drawTileName(Canvas canvas, BoardTileViewModel tile, Offset center) {
-    final fontSize = math.max(tileWidth * camera.zoom * 0.09, 8.0);
+  void _drawTileName(Canvas canvas, BoardTileViewModel tile, Offset center,
+      int row, int col, int gs) {
+    final fontSize = math.max(tileWidth * camera.zoom * 0.1, 9.0);
     final name = _displayName(tile);
     if (name.isEmpty) return;
+
     final tp = TextPainter(
       text: TextSpan(
         text: name,
         style: TextStyle(
           color: Colors.black87,
           fontSize: fontSize,
-          fontWeight: FontWeight.w500,
+          fontWeight: FontWeight.w600,
         ),
       ),
       textDirection: TextDirection.ltr,
@@ -229,8 +236,46 @@ class IsometricBoardPainter extends CustomPainter {
       maxLines: 1,
       ellipsis: '..',
     );
-    tp.layout(maxWidth: tileWidth * 0.7);
-    tp.paint(canvas, Offset(center.dx - tp.width / 2, center.dy - fontSize * 1.5));
+    tp.layout();
+
+    final hw = tileWidth / 2;
+    final hh = tileHeight / 4;
+    final isoA = math.atan2(hh, hw); // ~27°
+
+    // LEFT side: (0, -hh/2), isoA, END at midpoint  ← CONFIRMED
+    // BOTTOM: (-hw/2, hh/2), isoA, END at midpoint
+    // RIGHT: (hw/2, hh/2), -isoA, END at midpoint
+    // TOP: (0, -hh), -isoA, START at vertex
+
+    if (col == 0) {
+      // LEFT — isoA END at LT midpoint (-hw/2, -hh/2)
+      canvas.save();
+      canvas.translate(center.dx - hw / 2, center.dy - hh / 2);
+      canvas.rotate(isoA);
+      tp.paint(canvas, Offset(-tp.width, -tp.height / 2));
+      canvas.restore();
+    } else if (row == gs - 1) {
+      // BOTTOM — text END at outer edge midpoint (-hw/2, hh/2)
+      canvas.save();
+      canvas.translate(center.dx - hw / 2, center.dy + hh / 2);
+      canvas.rotate(-isoA);
+      tp.paint(canvas, Offset(-tp.width, -tp.height / 2));
+      canvas.restore();
+    } else if (col == gs - 1) {
+      // RIGHT — text STARTS at outer edge midpoint (hw/2, hh/2)
+      canvas.save();
+      canvas.translate(center.dx + hw / 2, center.dy + hh / 2);
+      canvas.rotate(isoA);
+      tp.paint(canvas, Offset(0, -tp.height / 2));
+      canvas.restore();
+    } else {
+      // TOP — text STARTS at outer edge midpoint (hw/2, -hh/2)
+      canvas.save();
+      canvas.translate(center.dx + hw / 2, center.dy - hh / 2);
+      canvas.rotate(-isoA);
+      tp.paint(canvas, Offset(0, -tp.height / 2));
+      canvas.restore();
+    }
   }
 
   void _drawPlayers(Canvas canvas, List<PlayerTokenViewModel> players, Offset center) {
@@ -311,22 +356,21 @@ class MinimapPainter extends CustomPainter {
     canvas.translate(size.width / 2, size.height / 2);
     canvas.scale(scale);
 
-    final tilesPerSide = (tiles.length - 4) ~/ 4;
     final positions = <int, int>{};
     int tileIdx = 0;
-    for (var i = 0; i <= tilesPerSide; i++) {
+    for (var i = 0; i < gridSize; i++) {
       positions[tileIdx] = (gridSize - 1) * gridSize + i;
       tileIdx++;
     }
-    for (var i = 0; i < tilesPerSide; i++) {
+    for (var i = 0; i < gridSize - 1; i++) {
       positions[tileIdx] = (gridSize - 2 - i) * gridSize + (gridSize - 1);
       tileIdx++;
     }
-    for (var i = 0; i <= tilesPerSide; i++) {
-      positions[tileIdx] = 0 * gridSize + (gridSize - 1 - i);
+    for (var i = 0; i < gridSize - 1; i++) {
+      positions[tileIdx] = 0 * gridSize + (gridSize - 2 - i);
       tileIdx++;
     }
-    for (var i = 0; i < tilesPerSide; i++) {
+    for (var i = 0; i < gridSize - 2; i++) {
       positions[tileIdx] = (1 + i) * gridSize + 0;
       tileIdx++;
     }
