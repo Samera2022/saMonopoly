@@ -39,7 +39,7 @@ jobs:
             artifact: linux-x64
             ext: ""
           - name: Windows
-            os: windows-latest
+            os: windows-2019
             build-cmd: windows
             artifact: windows-x64
             ext: ".exe"
@@ -71,10 +71,6 @@ jobs:
       run: |
         cd flutter
         flutter create --platforms=${{ matrix.build-cmd }} --project-name sa_monopoly .
-
-    - name: Flutter pub get
-      run: |
-        cd flutter
         flutter pub get
 
     - name: Build Flutter ${{ matrix.name }}
@@ -103,9 +99,10 @@ jobs:
     - name: Enable Web
       run: flutter config --enable-web
     - name: Create web dirs
-      run: cd flutter && flutter create --platforms=web --project-name sa_monopoly .
-    - name: Flutter pub get
-      run: cd flutter && flutter pub get
+      run: |
+        cd flutter
+        flutter create --platforms=web --project-name sa_monopoly .
+        flutter pub get
     - name: Build Flutter Web
       run: cd flutter && flutter build web --release
     - name: Upload Web build
@@ -114,7 +111,7 @@ jobs:
         name: sa-monopoly-web
         path: flutter/build/web
 
-  # ── Auto PR ──
+  # ── Auto PR (manual squash-merge) ──
   auto-pr:
     name: Auto PR to main
     needs: [rust-checks, flutter-build, flutter-web]
@@ -148,5 +145,5 @@ jobs:
           ✅ Flutter macOS
           ✅ Flutter Web
 
-          Click "Merge pull request" to merge.
+          Manually squash-merge via GitHub UI.
         labels: auto-pr

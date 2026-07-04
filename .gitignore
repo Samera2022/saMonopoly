@@ -7,3 +7,4 @@ Cargo.lock
 .build/
 flutter/.dart_tool/
 flutter/build/
+flutter/linux/

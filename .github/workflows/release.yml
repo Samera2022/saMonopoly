@@ -84,9 +84,10 @@ jobs:
       - name: Install Linux deps
         run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev
       - name: Create platform dirs
-        run: cd flutter && flutter create --platforms=linux --project-name sa_monopoly .
-      - name: Flutter pub get
-        run: cd flutter && flutter pub get
+        run: |
+          cd flutter
+          flutter create --platforms=linux --project-name sa_monopoly .
+          flutter pub get
       - name: Build Linux
         run: cd flutter && flutter build linux --release
       - name: Upload
@@ -99,7 +100,7 @@ jobs:
     name: Flutter Windows
     needs: detect
     if: needs.detect.outputs.is_release == 'true'
-    runs-on: windows-latest
+    runs-on: windows-2019
     steps:
       - uses: actions/checkout@v4
       - name: Setup Flutter
@@ -110,9 +111,11 @@ jobs:
       - name: Enable Windows desktop
         run: flutter config --enable-windows-desktop
       - name: Create platform dirs
-        run: cd flutter && flutter create --platforms=windows --project-name sa_monopoly .
-      - name: Flutter pub get
-        run: cd flutter && flutter pub get
+        shell: bash
+        run: |
+          cd flutter
+          flutter create --platforms=windows --project-name sa_monopoly .
+          flutter pub get
       - name: Build Windows
         run: cd flutter && flutter build windows --release
       - name: Upload
@@ -136,9 +139,10 @@ jobs:
       - name: Enable macOS desktop
         run: flutter config --enable-macos-desktop
       - name: Create platform dirs
-        run: cd flutter && flutter create --platforms=macos --project-name sa_monopoly .
-      - name: Flutter pub get
-        run: cd flutter && flutter pub get
+        run: |
+          cd flutter
+          flutter create --platforms=macos --project-name sa_monopoly .
+          flutter pub get
       - name: Build macOS
         run: cd flutter && flutter build macos --release
       - name: Upload
@@ -162,9 +166,10 @@ jobs:
       - name: Enable Web
         run: flutter config --enable-web
       - name: Create web dirs
-        run: cd flutter && flutter create --platforms=web --project-name sa_monopoly .
-      - name: Flutter pub get
-        run: cd flutter && flutter pub get
+        run: |
+          cd flutter
+          flutter create --platforms=web --project-name sa_monopoly .
+          flutter pub get
       - name: Build Web
         run: cd flutter && flutter build web --release --base-href /saMonopoly/
       - name: Upload
