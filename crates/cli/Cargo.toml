@@ -1,0 +1,10 @@
+[package]
+name = "sa-monopoly-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sa-monopoly-domain = { path = "../domain" }
+sa-monopoly-application = { path = "../application" }
+serde_json = "1"

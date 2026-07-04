@@ -1,0 +1,178 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '[0-9]*'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Step 1: Detect version ───────────────────────────────────────────────
+  detect:
+    name: Detect Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      is_release: ${{ steps.version.outputs.is_release }}
+    steps:
+      - name: Extract Version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG_NAME="${{ github.ref_name }}"
+            echo "Triggered by tag: $TAG_NAME"
+            if [[ "$TAG_NAME" =~ ^[vV]?([0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+)?)$ ]]; then
+              VERSION="${BASH_REMATCH[1]}"
+            else
+              echo "Tag is not a valid version number."
+              echo "is_release=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          else
+            COMMIT_MSG="${{ github.event.head_commit.message }}"
+            echo "Triggered by commit: $COMMIT_MSG"
+            if [[ "$COMMIT_MSG" =~ ^[vV]?([0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+)?)$ ]]; then
+              VERSION="${BASH_REMATCH[1]}"
+            else
+              echo "Commit message is not a version number."
+              echo "is_release=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "is_release=true" >> $GITHUB_OUTPUT
+
+  # ── Step 2: Build on all platforms ───────────────────────────────────────
+  build:
+    name: Build (${{ matrix.target }})
+    needs: detect
+    if: needs.detect.outputs.is_release == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            ext: ""
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            ext: ".exe"
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            ext: ""
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            ext: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: clippy
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build (release)
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Run tests
+        run: cargo test --workspace
+
+      - name: Run clippy
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: Archive binary
+        shell: bash
+        run: |
+          NAME="sa-monopoly-${{ needs.detect.outputs.version }}-${{ matrix.target }}${{ matrix.ext }}"
+          # Copy the CLI binary
+          cp "target/${{ matrix.target }}/release/sa-monopoly-cli${{ matrix.ext }}" "$NAME" 2>/dev/null || echo "No CLI binary"
+          # Also copy libraries used by Flutter FFI
+          ls target/${{ matrix.target }}/release/*.so 2>/dev/null && cp target/${{ matrix.target }}/release/*.so ./ || true
+          ls target/${{ matrix.target }}/release/*.dll 2>/dev/null && cp target/${{ matrix.target }}/release/*.dll ./ || true
+          ls target/${{ matrix.target }}/release/*.dylib 2>/dev/null && cp target/${{ matrix.target }}/release/*.dylib ./ || true
+          echo "Build artifacts for ${{ matrix.target }}:" && ls -la
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/sa-monopoly-cli${{ matrix.ext }}
+            target/${{ matrix.target }}/release/*.so
+            target/${{ matrix.target }}/release/*.dll
+            target/${{ matrix.target }}/release/*.dylib
+          if-no-files-found: ignore
+
+  # ── Step 3: Generate changelog and create release ────────────────────────
+  release:
+    name: Create Release
+    needs: [detect, build]
+    if: needs.detect.outputs.is_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate Changelog
+        shell: bash
+        run: |
+          TARGET_VERSION="${{ needs.detect.outputs.version }}"
+          JSON_PATH="updates.json"
+          if [ ! -f "$JSON_PATH" ]; then
+            echo "Release for $TARGET_VERSION" > release_body.txt
+            exit 0
+          fi
+          ENTRY=$(jq --arg v "$TARGET_VERSION" '.[$v]' "$JSON_PATH")
+          if [ "$ENTRY" = "null" ] || [ -z "$ENTRY" ]; then
+            FINAL_LOG="Release for version $TARGET_VERSION"
+          else
+            DATE=$(echo "$ENTRY" | jq -r '.releaseDate')
+            DESC=$(echo "$ENTRY" | jq -r '.description')
+            FINAL_LOG="[$DATE] $TARGET_VERSION"$'\n\n'"$DESC"
+          fi
+          echo "$FINAL_LOG" > release_body.txt
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: |
+          if [ -d "artifacts" ]; then
+            find artifacts -type f
+          else
+            echo "No artifacts directory found — build artifacts were empty."
+            mkdir -p artifacts
+          fi
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ needs.detect.outputs.version }}
+          tag_name: ${{ needs.detect.outputs.version }}
+          body_path: release_body.txt
+          draft: false
+          prerelease: false
+          files: |
+            artifacts/**/*
+            target/release/*.so
+            target/release/*.dll
+            target/release/*.dylib
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
