@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub trait SaveStore {
     fn save(&self, key: &str, data: &[u8]) -> Result<(), String>;
@@ -8,6 +8,7 @@ pub trait SaveStore {
 
 #[derive(Default)]
 pub struct MemorySaveStore {
+    #[allow(dead_code)]
     data: std::collections::HashMap<String, Vec<u8>>,
 }
 

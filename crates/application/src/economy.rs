@@ -90,7 +90,7 @@ impl EconomyService {
             let active_player = state
                 .players
                 .get_mut(active_idx)
-                .ok_or_else(|| DomainError::ActivePlayerNotFound)?;
+                .ok_or(DomainError::ActivePlayerNotFound)?;
 
             if active_player.cash < amount {
                 return Err(DomainError::InsufficientFunds {

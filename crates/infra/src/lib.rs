@@ -1,3 +1,4 @@
+#![allow(clippy::type_complexity)]
 pub mod ai;
 pub mod content;
 pub mod discovery;
