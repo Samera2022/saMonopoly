@@ -204,10 +204,10 @@ impl GameEngine {
                     },
                 };
                 // Sprint 4: Bankruptcy check after buying
-                if matches!(&event, GameEvent::PropertyBought { .. }) {
-                    if Self::is_active_player_bankrupt(state) {
-                        return GameEvent::PlayerBankrupt { player_id: pid };
-                    }
+                if matches!(&event, GameEvent::PropertyBought { .. })
+                    && Self::is_active_player_bankrupt(state)
+                {
+                    return GameEvent::PlayerBankrupt { player_id: pid };
                 }
                 event
             }
@@ -222,10 +222,10 @@ impl GameEngine {
                     },
                 };
                 // Sprint 4: Bankruptcy check after upgrading
-                if matches!(&event, GameEvent::CommandAccepted { .. }) {
-                    if Self::is_active_player_bankrupt(state) {
-                        return GameEvent::PlayerBankrupt { player_id: pid };
-                    }
+                if matches!(&event, GameEvent::CommandAccepted { .. })
+                    && Self::is_active_player_bankrupt(state)
+                {
+                    return GameEvent::PlayerBankrupt { player_id: pid };
                 }
                 event
             }
@@ -405,12 +405,12 @@ impl GameEngine {
 
                 // Sprint 4: Bankruptcy check after trade (check active player)
                 if let Some(active_id) = &player_id {
-                    if active_id == &from_player_id || active_id == &to_player_id {
-                        if Self::is_active_player_bankrupt(state) {
-                            return GameEvent::PlayerBankrupt {
-                                player_id: active_id.clone(),
-                            };
-                        }
+                    if (active_id == &from_player_id || active_id == &to_player_id)
+                        && Self::is_active_player_bankrupt(state)
+                    {
+                        return GameEvent::PlayerBankrupt {
+                            player_id: active_id.clone(),
+                        };
                     }
                 }
 
@@ -638,10 +638,10 @@ impl GameEngine {
                 let event = StockMarketService::sell_shares(state, &player_id, shares);
                 // Selling shares adds cash, so bankruptcy won't occur, but we keep the
                 // check for consistency with other handlers.
-                if matches!(&event, GameEvent::SharesSold { .. }) {
-                    if Self::is_active_player_bankrupt(state) {
-                        return GameEvent::PlayerBankrupt { player_id: player_id.clone() };
-                    }
+                if matches!(&event, GameEvent::SharesSold { .. })
+                    && Self::is_active_player_bankrupt(state)
+                {
+                    return GameEvent::PlayerBankrupt { player_id: player_id.clone() };
                 }
                 event
             }

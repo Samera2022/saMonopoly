@@ -6,25 +6,144 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  rust-ci:
+  # ── Rust quality checks (lightweight, one platform) ──
+  rust-checks:
+    name: Rust Checks
     runs-on: ubuntu-latest
-
     steps:
     - uses: actions/checkout@v4
-    
-    - name: Install Rust toolchain
+    - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
       with:
         components: clippy
-    
-    - name: Cache Cargo dependencies
+    - name: Cache Cargo
       uses: Swatinem/rust-cache@v2
-    
     - name: cargo check
       run: cargo check --workspace
-    
     - name: cargo test
       run: cargo test --workspace
-    
     - name: cargo clippy
       run: cargo clippy --workspace -- -D warnings
+
+  # ── Cross-platform GUI builds (Flutter) ──
+  flutter-build:
+    name: Flutter ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+            build-cmd: linux
+            artifact: linux-x64
+            ext: ""
+          - name: Windows
+            os: windows-2019
+            build-cmd: windows
+            artifact: windows-x64
+            ext: ".exe"
+          - name: macOS
+            os: macos-latest
+            build-cmd: macos
+            artifact: macos-x64
+            ext: ""
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: '3.24'
+        channel: 'stable'
+
+    - name: Enable ${{ matrix.name }} desktop
+      run: flutter config --enable-${{ matrix.build-cmd }}-desktop
+
+    - name: Install Linux deps
+      if: matrix.name == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev
+
+    - name: Create platform dirs
+      run: |
+        cd flutter
+        flutter create --platforms=${{ matrix.build-cmd }} --project-name sa_monopoly .
+        flutter pub get
+
+    - name: Build Flutter ${{ matrix.name }}
+      run: |
+        cd flutter
+        flutter build ${{ matrix.build-cmd }} --release
+
+    - name: Upload ${{ matrix.name }} build
+      uses: actions/upload-artifact@v4
+      with:
+        name: sa-monopoly-${{ matrix.artifact }}
+        path: flutter/build/${{ matrix.build-cmd }}/*
+        if-no-files-found: error
+
+  # ── Flutter Web build ──
+  flutter-web:
+    name: Flutter Web
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Setup Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: '3.24'
+        channel: 'stable'
+    - name: Enable Web
+      run: flutter config --enable-web
+    - name: Create web dirs
+      run: |
+        cd flutter
+        flutter create --platforms=web --project-name sa_monopoly .
+        flutter pub get
+    - name: Build Flutter Web
+      run: cd flutter && flutter build web --release
+    - name: Upload Web build
+      uses: actions/upload-artifact@v4
+      with:
+        name: sa-monopoly-web
+        path: flutter/build/web
+
+  # ── Auto PR (manual squash-merge) ──
+  auto-pr:
+    name: Auto PR to main
+    needs: [rust-checks, flutter-build, flutter-web]
+    if: >
+      github.ref != 'refs/heads/main' &&
+      github.ref != 'refs/heads/master' &&
+      !startsWith(github.ref, 'refs/tags/') &&
+      github.event_name == 'push' &&
+      success()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+    - uses: actions/checkout@v4
+    - name: Create PR to main
+      uses: peter-evans/create-pull-request@v7
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        base: main
+        branch: ${{ github.ref_name }}
+        title: "Auto PR: ${{ github.ref_name }} → main"
+        body: |
+          ## Auto-generated PR
+
+          Branch `${{ github.ref_name }}` has passed all checks.
+
+          ✅ Rust checks (test + clippy)
+          ✅ Flutter Linux
+          ✅ Flutter Windows
+          ✅ Flutter macOS
+          ✅ Flutter Web
+
+          Manually squash-merge via GitHub UI.
+        labels: auto-pr

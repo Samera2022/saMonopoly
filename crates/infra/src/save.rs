@@ -87,6 +87,7 @@ impl VersionedSaveCodec for JsonVersionedSaveCodec {
 
 /// A single migration step that transforms save data from one version to the
 /// next.
+#[allow(clippy::wrong_self_convention)]
 pub trait SaveMigration {
     /// The source version this migration applies to.
     fn from_version(&self) -> u32;

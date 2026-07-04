@@ -13,7 +13,7 @@ impl StockMarketRule {
     /// 50% chance of rising, 50% chance of falling,
     /// with magnitude controlled by volatility.
     pub fn tick(&mut self, rng: &mut impl FnMut() -> u64) {
-        let direction = if rng() % 2 == 0 { 1 } else { -1 };
+        let direction = if rng().is_multiple_of(2) { 1 } else { -1 };
         let step = (rng() % self.volatility as u64) as i64;
         self.current_index += direction * step;
     }

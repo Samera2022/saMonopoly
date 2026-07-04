@@ -314,7 +314,7 @@ impl PluginRegistry for InMemoryPluginRegistry {
         // (In a full implementation we would check against a global policy.)
 
         let mut p = plugin;
-        p.init().map_err(|e| PluginError::InitFailed(e))?;
+        p.init().map_err(PluginError::InitFailed)?;
 
         self.plugins.insert(
             id,
@@ -362,7 +362,7 @@ impl PluginRegistry for InMemoryPluginRegistry {
             .get_mut(id)
             .ok_or_else(|| PluginError::NotFound(id.to_string()))?;
         entry.enabled = true;
-        entry.plugin.init().map_err(|e| PluginError::InitFailed(e))
+        entry.plugin.init().map_err(PluginError::InitFailed)
     }
 
     fn disable(&mut self, id: &str) -> Result<(), PluginError> {

@@ -179,8 +179,8 @@ class PlayerViewModel {
       cash: (json['cash'] as num).toInt(),
       position: json['position'] as String,
       isAi: json['is_ai'] as bool? ?? false,
-      isInJail: (json['jail_turns'] as num?)?.toInt() > 0,
-      isInHospital: (json['hospital_turns'] as num?)?.toInt() > 0,
+      isInJail: ((json['jail_turns'] as num?)?.toInt() ?? 0) > 0,
+      isInHospital: ((json['hospital_turns'] as num?)?.toInt() ?? 0) > 0,
       ownedCards: (json['owned_cards'] as List<dynamic>?)
               ?.map((e) => e as String)
               .toList() ??

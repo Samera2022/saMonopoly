@@ -126,7 +126,7 @@ impl ScriptHost for JsScriptHost {
         let cleaned = Self::strip_js_comments(source);
         // Support statement sequences separated by semicolons or newlines.
         let statements: Vec<&str> = cleaned
-            .split(|c: char| c == ';' || c == '\n')
+            .split([';', '\n'])
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .collect();
@@ -203,6 +203,7 @@ impl Default for JsScriptHost {
 // WasmScriptHost – stub for WASM-based scripting
 // ---------------------------------------------------------------------------
 
+#[derive(Default)]
 pub struct WasmScriptHost;
 
 impl WasmScriptHost {
@@ -783,7 +784,7 @@ impl Lexer {
             || (ch == '-'
                 && {
                     let next = self.chars.get(self.pos + 1).copied();
-                    next.map_or(false, |n| n.is_ascii_digit())
+                    next.is_some_and(|n| n.is_ascii_digit())
                 })
         {
             let mut sign = 1i64;
@@ -1126,7 +1127,7 @@ impl SimpleExpressionEvaluator {
         let mut resolved = expr.to_string();
         // Sort keys by length (longest first) to handle overlapping names correctly
         let mut keys: Vec<&String> = vars.keys().collect();
-        keys.sort_by(|a, b| b.len().cmp(&a.len()));
+        keys.sort_by_key(|k| std::cmp::Reverse(k.len()));
         for key in &keys {
             if let Some(val) = vars.get(*key) {
                 let placeholder = format!("{{{}}}", key);

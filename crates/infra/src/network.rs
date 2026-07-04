@@ -156,13 +156,13 @@ impl Default for DisabledNetworkTransport {
 
 impl NetworkTransport for DisabledNetworkTransport {
     fn send(&self, _endpoint: &SessionEndpoint, _message: &NetworkMessage) -> Result<(), String> {
-        if self.config.is_none() {
-            Err("network transport is disabled – no WebSocketConfig set".to_string())
-        } else {
+        if let Some(ref config) = self.config {
             Err(format!(
                 "network transport configured at {} but not yet active",
-                self.config.as_ref().unwrap().host
+                config.host
             ))
+        } else {
+            Err("network transport is disabled – no WebSocketConfig set".to_string())
         }
     }
 

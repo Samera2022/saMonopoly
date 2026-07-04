@@ -117,9 +117,24 @@ class _GameScreenState extends State<GameScreen> {
   final ScrollController _logScrollController = ScrollController();
 
   // ---- Game state ----------------------------------------------------------
-  late GameStateData _gameState;
+  GameStateData _gameState = const GameStateData();
   late ContentPackViewModel _pack;
   late Map<String, dynamic> _currentState;
+
+  // ---- Animation state -----------------------------------------------------
+  bool _isAnimating = false;
+  /// Overridden player tile IDs during hopping animation.
+  final Map<int, String> _animatedPositions = {};
+
+  // ---- Dice animation state ------------------------------------------------
+  bool _isRollingDice = false;
+  int _animDice1 = 1;
+  int _animDice2 = 1;
+
+  // ---- Turn state ----------------------------------------------------------
+  /// Number of rolls remaining for the current active player this turn.
+  /// Default: 1. Re-rolls when die=6 add another roll.
+  int _rollsRemainingThisTurn = 1;
 
   // Player colours
   static const List<Color> _playerColors = [
@@ -197,6 +212,7 @@ class _GameScreenState extends State<GameScreen> {
     final tiles = _defaultTiles
         .map((t) => {
               'id': t['id'],
+              'name': t['name'],
               'name_key': 'tile.${t['id']}',
               'kind': t['kind'],
               'linked_property_kind': null,
@@ -266,17 +282,25 @@ class _GameScreenState extends State<GameScreen> {
   }
 
   /// Build a [GameStateData] from a raw state JSON map.
+  /// Optionally override player tile positions (used during animation).
   GameStateData _buildGameState(Map<String, dynamic> rawState,
-      {String lastEvent = '', Map<String, int> diceResult = const {}}) {
+      {String lastEvent = '', Map<String, int> diceResult = const {},
+      Map<int, String>? positionOverrides}) {
     final playersList = BridgeClient.parsePlayers(rawState);
     final tokens = playersList
-        .map((p) => PlayerTokenViewModel(
-              id: p.id,
-              name: p.name,
-              tileId: p.position,
-              color: _playerColors[_playerIndex(p.id) % _playerColors.length],
-              cash: p.cash,
-            ))
+        .map((p) {
+          final idx = _playerIndex(p.id);
+          final tileId = positionOverrides?.containsKey(idx) == true
+              ? positionOverrides![idx]!
+              : p.position;
+          return PlayerTokenViewModel(
+            id: p.id,
+            name: p.name,
+            tileId: tileId,
+            color: _playerColors[idx % _playerColors.length],
+            cash: p.cash,
+          );
+        })
         .toList();
 
     return GameStateData(
@@ -309,7 +333,61 @@ class _GameScreenState extends State<GameScreen> {
     );
     final dice1 = (response.event['dice1'] as num?)?.toInt() ?? 0;
     final dice2 = (response.event['dice2'] as num?)?.toInt() ?? 0;
+    final steps = dice1 + dice2;
 
+    // ---- Dice rolling animation ------------------------------------------
+    _isRollingDice = true;
+    for (var i = 0; i < 8; i++) {
+      await Future.delayed(const Duration(milliseconds: 60));
+      if (!mounted) return;
+      setState(() {
+        _animDice1 = 1 + (i * 3 + 1) % 6;
+        _animDice2 = 1 + (i * 7 + 3) % 6;
+      });
+    }
+    // Show final dice values
+    setState(() {
+      _animDice1 = dice1;
+      _animDice2 = dice2;
+      _isRollingDice = false;
+    });
+
+    // Compute the animation path (intermediate tile IDs)
+    final rawTiles = (_currentState['board'] as Map<String, dynamic>?)?
+        ['tiles'] as List<dynamic>? ?? [];
+    final activeIdx = _gameState.activePlayerIndex;
+    final currentPos = _gameState.players[activeIdx].tileId;
+    final currentTileIdx = rawTiles.indexWhere((t) => t['id'] == currentPos);
+
+    final path = <String>[];
+    if (rawTiles.isNotEmpty) {
+      for (var i = 1; i <= steps; i++) {
+        final idx = (currentTileIdx + i) % rawTiles.length;
+        path.add(rawTiles[idx]['id'] as String);
+      }
+    }
+
+    // Animate: hop through each intermediate tile
+    if (path.isNotEmpty) {
+      _isAnimating = true;
+      for (var i = 0; i < path.length; i++) {
+        await Future.delayed(const Duration(milliseconds: 150));
+        if (!mounted) return;
+        setState(() {
+          _animatedPositions[activeIdx] = path[i];
+          _gameState = _buildGameState(
+            _currentState,
+            lastEvent: 'Rolled $dice1 + $dice2',
+            diceResult: {'dice1': dice1, 'dice2': dice2},
+            positionOverrides: Map.of(_animatedPositions),
+          );
+        });
+      }
+      _isAnimating = false;
+      _animatedPositions.clear();
+    }
+
+    // Apply final state from the engine
     setState(() {
       _currentState = response.state;
       _gameState = _buildGameState(
@@ -320,13 +398,187 @@ class _GameScreenState extends State<GameScreen> {
     });
     _addLog('Rolled $dice1 + $dice2 = ${dice1 + dice2}');
 
-    // Check if player landed on a purchasable property
+    // Resolve special tile effects
     final playerPos =
         _currentState['players'][_gameState.activePlayerIndex]['position'];
+    await _resolveTileEffect(playerPos);
+
+    // Decrement rolls remaining; if single die shows 6, grant re-roll
+    _rollsRemainingThisTurn--;
+    // Single die mode: die face = dice1 (simulated as dice1%6+1)
+    final dieFace = dice1; // already the displayed face value
+    if (dieFace == 6) {
+      _rollsRemainingThisTurn++;
+      _addLog('Rolled a 6! Extra roll granted.');
+    }
+    setState(() {}); // refresh button state
+
+    // Check if player landed on a purchasable property
     final property = _findPropertyAtTile(playerPos);
     if (property != null && property['owner'] == null) {
       _showBuyPropertyDialog(playerPos, property);
     }
+  }
+
+  /// Resolve the effect of the tile the active player landed on.
+  /// Mirrors [crate::effects::EffectResolver::resolve_special_tile].
+  Future<void> _resolveTileEffect(String tileId) async {
+    final rawTiles = (_currentState['board'] as Map<String, dynamic>?)?
+        ['tiles'] as List<dynamic>? ?? [];
+    final tileData = rawTiles.cast<Map<String, dynamic>>().firstWhere(
+      (t) => t['id'] == tileId,
+      orElse: () => <String, dynamic>{},
+    );
+    if (tileData.isEmpty) return;
+
+    final kind = tileData['kind'] as String? ?? '';
+    final name = tileData['name'] as String? ?? tileId;
+
+    switch (kind) {
+      case 'Start':
+        _addLog('Landed on Start');
+        break;
+
+      case 'Chance':
+        await _showChanceCardDialog();
+        break;
+
+      case 'Bank':
+        // Income Tax / Luxury Tax / Free Parking
+        if (tileId == 'tax_1') {
+          // Income Tax: pay $200
+          _deductCash(_gameState.activePlayerIndex, 200);
+          _addLog('Paid Income Tax: -\$200');
+        } else if (tileId == 'tax_2') {
+          // Luxury Tax: pay $100
+          _deductCash(_gameState.activePlayerIndex, 100);
+          _addLog('Paid Luxury Tax: -\$100');
+        } else {
+          // Free Parking: bonus $200
+          _addCash(_gameState.activePlayerIndex, 200);
+          _addLog('Free Parking bonus: +\$200');
+        }
+        break;
+
+      case 'Jail':
+        if (tileId == 'go_to_jail') {
+          // Send to jail
+          _sendToJail(_gameState.activePlayerIndex);
+          _addLog('Go to Jail!');
+        } else {
+          // Just visiting
+          _addLog('Just visiting Jail');
+        }
+        break;
+
+      default:
+        break;
+    }
+  }
+
+  void _deductCash(int playerIdx, int amount) {
+    setState(() {
+      final players = List<Map<String, dynamic>>.from(
+          _currentState['players'] as List<dynamic>? ?? []);
+      if (playerIdx < players.length) {
+        final player = Map<String, dynamic>.from(players[playerIdx]);
+        player['cash'] = ((player['cash'] as num?)?.toInt() ?? 0) - amount;
+        players[playerIdx] = player;
+        _currentState['players'] = players;
+        _gameState = _buildGameState(_currentState, lastEvent: '-\$$amount');
+      }
+    });
+  }
+
+  void _addCash(int playerIdx, int amount) {
+    setState(() {
+      final players = List<Map<String, dynamic>>.from(
+          _currentState['players'] as List<dynamic>? ?? []);
+      if (playerIdx < players.length) {
+        final player = Map<String, dynamic>.from(players[playerIdx]);
+        player['cash'] = ((player['cash'] as num?)?.toInt() ?? 0) + amount;
+        players[playerIdx] = player;
+        _currentState['players'] = players;
+        _gameState = _buildGameState(_currentState, lastEvent: '+\$$amount');
+      }
+    });
+  }
+
+  void _sendToJail(int playerIdx) {
+    setState(() {
+      final players = List<Map<String, dynamic>>.from(
+          _currentState['players'] as List<dynamic>? ?? []);
+      if (playerIdx < players.length) {
+        final player = Map<String, dynamic>.from(players[playerIdx]);
+        player['position'] = 'jail';
+        player['jail_turns'] = 3;
+        players[playerIdx] = player;
+        _currentState['players'] = players;
+        _gameState = _buildGameState(_currentState, lastEvent: 'Sent to jail');
+      }
+    });
+  }
+
+  Future<void> _showChanceCardDialog() async {
+    final messages = [
+      'Advance to Go. Collect \$200',
+      'Bank error in your favor. Collect \$200',
+      'Doctor\'s fee. Pay \$50',
+      'Go to Jail. Go directly to Jail',
+      'Holiday fund matures. Collect \$100',
+      'Income tax refund. Collect \$20',
+      'Pay hospital fees of \$100',
+      'Receive \$25 consultancy fee',
+      'You are assessed for street repairs: \$40 per house',
+      'You have won a crossword competition. Collect \$100',
+    ];
+    final msg = messages[DateTime.now().millisecondsSinceEpoch % messages.length];
+    final isGood = msg.startsWith('Advance') ||
+        msg.startsWith('Bank') ||
+        msg.startsWith('Holiday') ||
+        msg.startsWith('Income') ||
+        msg.startsWith('Receive') ||
+        msg.startsWith('You have won');
+
+    if (!mounted) return;
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Chance Card'),
+        content: Text(msg),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+
+    if (!isGood) {
+      // Pay the fee if applicable
+      if (msg.contains('\$50')) {
+        _deductCash(_gameState.activePlayerIndex, 50);
+      } else if (msg.contains('\$100') && !msg.contains('collect')) {
+        _deductCash(_gameState.activePlayerIndex, 100);
+      } else if (msg.contains('\$40')) {
+        _deductCash(_gameState.activePlayerIndex, 40);
+      }
+    } else {
+      if (msg.contains('\$200') && !msg.contains('assessed')) {
+        _addCash(_gameState.activePlayerIndex, 200);
+      } else if (msg.contains('\$100')) {
+        _addCash(_gameState.activePlayerIndex, 100);
+      } else if (msg.contains('\$20')) {
+        _addCash(_gameState.activePlayerIndex, 20);
+      } else if (msg.contains('\$25')) {
+        _addCash(_gameState.activePlayerIndex, 25);
+      }
+    }
+    if (msg.contains('Go to Jail')) {
+      _sendToJail(_gameState.activePlayerIndex);
+    }
+    _addLog('Chance: $msg');
   }
 
   Future<void> _onEndTurn() async {
@@ -340,6 +592,7 @@ class _GameScreenState extends State<GameScreen> {
         response.state,
         lastEvent: 'Turn ended',
       );
+      _rollsRemainingThisTurn = 1;
     });
     _addLog(
         'Turn ${_gameState.currentTurn} — Player ${_gameState.activePlayerIndex + 1}\'s turn');
@@ -598,18 +851,12 @@ class _GameScreenState extends State<GameScreen> {
     final tiles = rawTiles
         .map((t) => BoardTileViewModel(
               id: t['id'] as String,
-              name: t['name_key'] as String? ??
+              name: t['name'] as String? ??
+                  t['name_key'] as String? ??
                   t['id'] as String,
               kind: t['kind'] as String? ?? 'Unknown',
             ))
         .toList();
-
-    final boardViewModel = BoardViewModel(
-      mapName: 'Classic',
-      tiles: tiles,
-      players: _gameState.players,
-      activePlayerIndex: _gameState.activePlayerIndex,
-    );
 
     // Determine player property owners for display
     final propertyOwners = <String, String>{};
@@ -623,6 +870,14 @@ class _GameScreenState extends State<GameScreen> {
         propertyOwners[p['tile_id'] as String] = owner;
       }
     }
+
+    final boardViewModel = BoardViewModel(
+      mapName: 'Classic',
+      tiles: tiles,
+      players: _gameState.players,
+      activePlayerIndex: _gameState.activePlayerIndex,
+      propertyOwners: propertyOwners,
+    );
 
     return GameStateWidget(
       data: _gameState,
@@ -639,31 +894,46 @@ class _GameScreenState extends State<GameScreen> {
           ],
         ),
         body: SafeArea(
-          child: Column(
+          child: Row(
             children: [
-              // ---- Player info bar -----------------------------------------
-              _buildPlayerInfoBar(activePlayer!),
-
-              // ---- Board ---------------------------------------------------
+              // ---- Board (left side, takes most space) ---------------------
               Expanded(
                 flex: 3,
                 child: Padding(
-                  padding: const EdgeInsets.all(8.0),
+                  padding: const EdgeInsets.all(4),
                   child: BoardWidget(
                     viewModel: boardViewModel,
                   ),
                 ),
               ),
 
-              // ---- Dice result display -------------------------------------
-              if (_gameState.diceResult.isNotEmpty)
-                _buildDiceDisplay(),
-
-              // ---- Action buttons ------------------------------------------
-              _buildActionButtons(activePlayer),
-
-              // ---- Event log (compact) ------------------------------------
-              _buildEventLog(),
+              // ---- Right sidebar (player info, dice, controls, log) --------
+              SizedBox(
+                width: 220,
+                child: Column(
+                  children: [
+                    // Player info
+                    _buildPlayerInfoBar(activePlayer!),
+                    const Divider(height: 1),
+                    // Dice display
+                    _buildDiceDisplay(),
+                    const Divider(height: 1),
+                    // Action buttons
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      child: _buildActionButtons(activePlayer!),
+                    ),
+                    const Divider(height: 1),
+                    // Event log
+                    Expanded(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        child: _buildEventLog(),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ],
           ),
         ),
@@ -673,114 +943,91 @@ class _GameScreenState extends State<GameScreen> {
 
   Widget _buildPlayerInfoBar(PlayerTokenViewModel activePlayer) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.all(8),
       color: Theme.of(context).colorScheme.surfaceContainerHighest,
-      child: Row(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          // Active player indicator
-          CircleAvatar(
-            backgroundColor: activePlayer.color,
-            radius: 18,
-            child: Text(
-              activePlayer.name.isNotEmpty
-                  ? activePlayer.name[0].toUpperCase()
-                  : '?',
-              style: const TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  activePlayer.name,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 16,
-                  ),
-                ),
-                Text(
-                  'Turn ${_gameState.currentTurn} | '
-                  'Properties: ${_playerPropertyCount(activePlayer.id)}',
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-              ],
-            ),
-          ),
-          // Cash display
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            decoration: BoxDecoration(
-              color: Colors.green.shade50,
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: Colors.green.shade200),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(Icons.attach_money, color: Colors.green, size: 18),
-                Text(
-                  '\$${activePlayer.cash}',
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 16,
-                    color: Colors.green,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 8),
-          // All player indicators
-          ..._gameState.players.map((p) {
-            final isActive = p.id == activePlayer.id;
-            return Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 2),
-              child: CircleAvatar(
-                radius: 10,
-                backgroundColor:
-                    isActive ? p.color : p.color.withOpacity(0.3),
+          // Active player avatar and name
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CircleAvatar(
+                backgroundColor: activePlayer.color,
+                radius: 14,
                 child: Text(
-                  p.name.isNotEmpty ? p.name[0].toUpperCase() : '?',
-                  style: TextStyle(
-                    color: isActive ? Colors.white : Colors.white60,
-                    fontSize: 10,
+                  activePlayer.name.isNotEmpty
+                      ? activePlayer.name[0].toUpperCase()
+                      : '?',
+                  style: const TextStyle(
+                    color: Colors.white,
                     fontWeight: FontWeight.bold,
+                    fontSize: 12,
                   ),
                 ),
               ),
-            );
-          }),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(
+                  activePlayer.name,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          // Cash
+          Text(
+            '\$${activePlayer.cash}',
+            style: const TextStyle(
+              fontWeight: FontWeight.bold,
+              fontSize: 16,
+              color: Colors.green,
+            ),
+          ),
+          const SizedBox(height: 2),
+          // Turn + properties
+          Text(
+            'Turn ${_gameState.currentTurn} | ${_playerPropertyCount(activePlayer.id)} props',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(fontSize: 10),
+          ),
         ],
       ),
     );
   }
 
   Widget _buildDiceDisplay() {
-    final dice1 = _gameState.diceResult['dice1'] ?? 0;
-    final dice2 = _gameState.diceResult['dice2'] ?? 0;
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          _diceFace(dice1),
-          const SizedBox(width: 12),
-          _diceFace(dice2),
-          const SizedBox(width: 16),
-          Text(
-            '= ${dice1 + dice2}',
-            style: const TextStyle(
-              fontSize: 20,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-        ],
-      ),
+    // Use animated values during rolling, otherwise use actual result
+    final dice1 = _isRollingDice ? _animDice1 : (_gameState.diceResult['dice1'] ?? 0);
+    final dice2 = _isRollingDice ? _animDice2 : (_gameState.diceResult['dice2'] ?? 0);
+    final show = _isRollingDice || _gameState.diceResult.isNotEmpty;
+    return SizedBox(
+      height: 60,
+      child: show
+          ? Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  _diceFace(dice1),
+                  const SizedBox(width: 8),
+                  _diceFace(dice2),
+                  const SizedBox(width: 10),
+                  Text(
+                    '= ${dice1 + dice2}',
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+            )
+          : const SizedBox.shrink(),
     );
   }
 
@@ -815,81 +1062,102 @@ class _GameScreenState extends State<GameScreen> {
   Widget _buildActionButtons(PlayerTokenViewModel activePlayer) {
     final isMyTurn = _gameState.activePlayerIndex ==
         _gameState.players.indexOf(activePlayer);
+    final canAct = isMyTurn && !_isAnimating;
+    final canRoll = canAct && _rollsRemainingThisTurn > 0;
     
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-      child: Row(
-        children: [
-          // Roll dice
-          Expanded(
-            child: FilledButton.icon(
-              onPressed: isMyTurn ? _onRoll : null,
-              icon: const Icon(Icons.casino),
-              label: const Text('Roll'),
-            ),
-          ),
-          const SizedBox(width: 8),
-          // Buy property
-          Expanded(
-            child: OutlinedButton.icon(
-              onPressed: isMyTurn ? () {
-                final pos = _gameState
-                    .players[_gameState.activePlayerIndex]
-                    .tileId;
-                final prop = _findPropertyAtTile(pos);
-                if (prop != null && prop['owner'] == null) {
-                  _showBuyPropertyDialog(pos, prop);
-                } else {
-                  _addLog('No property to buy here');
-                }
-              } : null,
-              icon: const Icon(Icons.shopping_cart),
-              label: const Text('Buy'),
-            ),
-          ),
-          const SizedBox(width: 8),
-          // Trade
-          IconButton(
-            onPressed: () => _showTradeDialog(),
-            icon: const Icon(Icons.swap_horiz),
-            tooltip: 'Trade',
-          ),
-          // Card shop
-          IconButton(
-            onPressed: () => _showCardShopDialog(),
-            icon: const Icon(Icons.style),
-            tooltip: 'Card Shop',
-          ),
-          const SizedBox(width: 4),
-          // End turn
-          Expanded(
-            child: FilledButton.tonalIcon(
-              onPressed: isMyTurn ? _onEndTurn : null,
-              icon: const Icon(Icons.skip_next),
-              label: const Text('End Turn'),
-            ),
-          ),
-        ],
-      ),
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // Roll dice (1 per turn, re-roll only on 6)
+        FilledButton.icon(
+          onPressed: canRoll ? _onRoll : null,
+          icon: const Icon(Icons.casino, size: 18),
+          label: Text(_rollsRemainingThisTurn > 1
+              ? 'Roll ($_rollsRemainingThisTurn)'
+              : 'Roll'),
+        ),
+        const SizedBox(height: 4),
+        // Buy property
+        OutlinedButton.icon(
+          onPressed: isMyTurn ? () {
+            final pos = _gameState
+                .players[_gameState.activePlayerIndex]
+                .tileId;
+            final prop = _findPropertyAtTile(pos);
+            if (prop != null && prop['owner'] == null) {
+              _showBuyPropertyDialog(pos, prop);
+            } else {
+              _addLog('No property to buy here');
+            }
+          } : null,
+          icon: const Icon(Icons.shopping_cart, size: 18),
+          label: const Text('Buy'),
+        ),
+        const SizedBox(height: 4),
+        // Trade
+        OutlinedButton.icon(
+          onPressed: () => _showTradeDialog(),
+          icon: const Icon(Icons.swap_horiz, size: 18),
+          label: const Text('Trade'),
+        ),
+        const SizedBox(height: 4),
+        // Card shop
+        OutlinedButton.icon(
+          onPressed: () => _showCardShopDialog(),
+          icon: const Icon(Icons.style, size: 18),
+          label: const Text('Card Shop'),
+        ),
+        const SizedBox(height: 4),
+        // End turn
+        FilledButton.tonalIcon(
+          onPressed: canAct ? _onEndTurn : null,
+          icon: const Icon(Icons.skip_next, size: 18),
+          label: const Text('End Turn'),
+        ),
+      ],
     );
   }
 
   Widget _buildEventLog() {
     final events = _gameState.eventLog;
+    return ListView.builder(
+      controller: _logScrollController,
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+      itemCount: events.length,
+      itemBuilder: (context, index) {
+        return Text(
+          events[index],
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: Colors.grey.shade600,
+                fontSize: 11,
+              ),
+        );
+      },
+    );
+  }
+
+  /// Compact row: action buttons on the left, event log on the right.
+  Widget _buildControlsAndLog(PlayerTokenViewModel activePlayer) {
     return Container(
-      constraints: const BoxConstraints(maxHeight: 100),
-      child: ListView.builder(
-        controller: _logScrollController,
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-        itemCount: events.length,
-        itemBuilder: (context, index) {
-          return Text(
-            events[index],
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: Colors.grey.shade600,
-                ),
-          );
-        },
+      padding: const EdgeInsets.fromLTRB(8, 2, 8, 4),
+      child: Row(
+        children: [
+          // Action buttons
+          Expanded(
+            flex: 3,
+            child: _buildActionButtons(activePlayer),
+          ),
+          const SizedBox(width: 8),
+          // Event log (compact)
+          Expanded(
+            flex: 2,
+            child: SizedBox(
+              height: 60,
+              child: _buildEventLog(),
+            ),
+          ),
+        ],
       ),
     );
   }

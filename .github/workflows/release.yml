@@ -1,0 +1,251 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '[0-9]*'
+  workflow_dispatch:
+    inputs:
+      test_version:
+        description: 'Test version (leave empty to auto-detect from commit/tag)'
+        required: false
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Step 1: Detect version ───────────────────────────────────────────────
+  detect:
+    name: Detect Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      is_release: ${{ steps.version.outputs.is_release }}
+    steps:
+      - name: Extract Version
+        id: version
+        shell: bash
+        run: |
+          # Priority: workflow_dispatch test_version > tag > commit message
+          TEST_VERSION="${{ github.event.inputs.test_version }}"
+          if [ -n "$TEST_VERSION" ]; then
+            echo "Triggered by workflow_dispatch with test_version: $TEST_VERSION"
+            VERSION="$TEST_VERSION"
+            echo "dry_run=true" >> $GITHUB_OUTPUT
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG_NAME="${{ github.ref_name }}"
+            echo "Triggered by tag: $TAG_NAME"
+            if [[ "$TAG_NAME" =~ ^[vV]?([0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+)?)$ ]]; then
+              VERSION="${BASH_REMATCH[1]}"
+            else
+              echo "Tag is not a valid version number."
+              echo "is_release=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            echo "dry_run=false" >> $GITHUB_OUTPUT
+          else
+            COMMIT_MSG="${{ github.event.head_commit.message }}"
+            echo "Triggered by commit: $COMMIT_MSG"
+            if [[ "$COMMIT_MSG" =~ ^[vV]?([0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+)?)$ ]]; then
+              VERSION="${BASH_REMATCH[1]}"
+            else
+              echo "Commit message is not a version number."
+              echo "is_release=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            echo "dry_run=false" >> $GITHUB_OUTPUT
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "is_release=true" >> $GITHUB_OUTPUT
+
+      - name: Show resolved config
+        if: steps.version.outputs.is_release == 'true'
+        run: |
+          echo "Version: ${{ steps.version.outputs.version }}"
+          echo "Dry run: ${{ steps.version.outputs.dry_run }}"
+          echo "Is release: ${{ steps.version.outputs.is_release }}"
+
+  # ── Step 2: Build Flutter GUI apps on all platforms ─────────────────────
+  build-linux:
+    name: Flutter Linux
+    needs: detect
+    if: needs.detect.outputs.is_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24'
+          channel: 'stable'
+      - name: Enable Linux desktop
+        run: flutter config --enable-linux-desktop
+      - name: Install Linux deps
+        run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev
+      - name: Create platform dirs
+        run: |
+          cd flutter
+          flutter create --platforms=linux --project-name sa_monopoly .
+          flutter pub get
+      - name: Build Linux
+        run: cd flutter && flutter build linux --release
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: sa-monopoly-linux-x64
+          path: flutter/build/linux/*/release/bundle/*
+
+  build-windows:
+    name: Flutter Windows
+    needs: detect
+    if: needs.detect.outputs.is_release == 'true'
+    runs-on: windows-2019
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24'
+          channel: 'stable'
+      - name: Enable Windows desktop
+        run: flutter config --enable-windows-desktop
+      - name: Create platform dirs
+        shell: bash
+        run: |
+          cd flutter
+          flutter create --platforms=windows --project-name sa_monopoly .
+          flutter pub get
+      - name: Build Windows
+        run: cd flutter && flutter build windows --release
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: sa-monopoly-windows-x64
+          path: flutter/build/windows/*/release/*
+
+  build-macos:
+    name: Flutter macOS
+    needs: detect
+    if: needs.detect.outputs.is_release == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24'
+          channel: 'stable'
+      - name: Enable macOS desktop
+        run: flutter config --enable-macos-desktop
+      - name: Create platform dirs
+        run: |
+          cd flutter
+          flutter create --platforms=macos --project-name sa_monopoly .
+          flutter pub get
+      - name: Build macOS
+        run: cd flutter && flutter build macos --release
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: sa-monopoly-macos-x64
+          path: flutter/build/macos/*/release/*
+
+  build-web:
+    name: Flutter Web
+    needs: detect
+    if: needs.detect.outputs.is_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24'
+          channel: 'stable'
+      - name: Enable Web
+        run: flutter config --enable-web
+      - name: Create web dirs
+        run: |
+          cd flutter
+          flutter create --platforms=web --project-name sa_monopoly .
+          flutter pub get
+      - name: Build Web
+        run: cd flutter && flutter build web --release --base-href /saMonopoly/
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: sa-monopoly-web
+          path: flutter/build/web
+
+  # ── Step 3: Generate changelog and create release ────────────────────────
+  release:
+    name: Create Release
+    needs: [detect, build-linux, build-windows, build-macos, build-web]
+    if: needs.detect.outputs.is_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate Changelog
+        shell: bash
+        run: |
+          TARGET_VERSION="${{ needs.detect.outputs.version }}"
+          JSON_PATH="updates.json"
+          if [ ! -f "$JSON_PATH" ]; then
+            echo "Release for $TARGET_VERSION" > release_body.txt
+            exit 0
+          fi
+          ENTRY=$(jq --arg v "$TARGET_VERSION" '.[$v]' "$JSON_PATH")
+          if [ "$ENTRY" = "null" ] || [ -z "$ENTRY" ]; then
+            FINAL_LOG="Release for version $TARGET_VERSION"
+          else
+            DATE=$(echo "$ENTRY" | jq -r '.releaseDate')
+            DESC=$(echo "$ENTRY" | jq -r '.description')
+            FINAL_LOG="[$DATE] $TARGET_VERSION"$'\n\n'"$DESC"
+          fi
+          echo "$FINAL_LOG" > release_body.txt
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: |
+          if [ -d "artifacts" ]; then
+            find artifacts -type f
+          else
+            echo "No artifacts directory found — build artifacts were empty."
+            mkdir -p artifacts
+          fi
+
+      - name: Preview release body (dry-run or actual)
+        run: |
+          echo "=== Release body preview ==="
+          cat release_body.txt
+          echo ""
+          echo "=== Files to attach ==="
+          find artifacts -type f 2>/dev/null || echo "(no artifacts)"
+          echo "=========================="
+
+      - name: Publish Release
+        if: needs.detect.outputs.dry_run != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ needs.detect.outputs.version }}
+          tag_name: ${{ needs.detect.outputs.version }}
+          body_path: release_body.txt
+          draft: false
+          prerelease: false
+          files: |
+            artifacts/**/*
+            target/release/*.so
+            target/release/*.dll
+            target/release/*.dylib
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
