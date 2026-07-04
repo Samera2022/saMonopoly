@@ -1,6 +1,6 @@
 use std::io::Read;
 
-use sa_monopoly_application::bridge::{BridgeRequest, EngineBridge};
+use sa_monopoly_application::bridge::EngineBridge;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
