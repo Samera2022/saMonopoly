@@ -347,13 +347,21 @@ class MinimapPainter extends CustomPainter {
     final tiles = viewModel.tiles;
     if (tiles.isEmpty) return;
 
+    // Use 0.9 to make the map slightly smaller (was 0.8).
     final scale = math.min(
-      size.width / (gridSize * tileWidth * 0.8),
-      size.height / (gridSize * tileHeight * 0.8),
+      size.width / (gridSize * tileWidth * 0.9),
+      size.height / (gridSize * tileHeight * 0.9),
     );
 
+    final hw = tileWidth / 2;
+    final hh = tileHeight / 4;
+
     canvas.save();
-    canvas.translate(size.width / 2, size.height / 2);
+    // Shift up to center, but multiply by 0.85 to leave it slightly low.
+    canvas.translate(
+      size.width / 2,
+      size.height / 2 - (gridSize - 1) * hh * scale * 0.85,
+    );
     canvas.scale(scale);
 
     final positions = <int, int>{};
@@ -374,9 +382,6 @@ class MinimapPainter extends CustomPainter {
       positions[tileIdx] = (1 + i) * gridSize + 0;
       tileIdx++;
     }
-
-    final hw = tileWidth / 2;
-    final hh = tileHeight / 4;
 
     for (final entry in positions.entries) {
       final ti = entry.key;
