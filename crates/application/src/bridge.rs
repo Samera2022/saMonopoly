@@ -64,6 +64,7 @@ impl EngineBridge {
                     tiles: vec![],
                     properties: vec![],
                     graph: Default::default(),
+                    auto_link_rent: false,
                 },
                 players: vec![],
                 ruleset: sa_monopoly_domain::RuleSetRef {

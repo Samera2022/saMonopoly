@@ -159,6 +159,69 @@ class _GameScreenState extends State<GameScreen> {
     Color(0xFFFF6F00),
   ];
 
+  /// Set to `true` to use the complex L-shaped test board instead of the
+  /// classic rectangular 40-tile layout.
+  bool _useComplexBoard = true;
+
+  // ── Complex L‑shaped test board ─────────────────────────────────────────
+  //
+  // Grid layout (row, col):
+  //
+  //         C0  C1  C2  C3  C4
+  //   R0:  [11] [–] [9] [–] [–]
+  //   R1:  [12] [–] [8] [7] [–]
+  //   R2:  [13] [–] [–] [–] [–]
+  //   R3:  [14] [–] [–] [–] [–]
+  //   R4:  [15] [0] [1] [2] [3]
+  //
+  // Path: 15→0→1→2→3→4→5→6→7→8→9→10→11→12→13→14→(back to 15)
+  //
+  // Corners:
+  //   tile  4 (4,4) right→up      → _|   type  (\ → /)
+  //   tile  7 (1,4) up→left        → -|   type  (/ → \)
+  //   tile  9 (1,2) left→up        → |-   type  (\ → /)
+  //   tile 12 (0,0) left→down      → |-   type  (\ → /)
+  //   tile 15 (3,0) down→right     → |_   type  (/ → \)
+
+  /// Perimeter grid positions for the complex L‑shaped board (row, col).
+  final List<(int, int)> _complexPositions = const [
+    (4, 0), // tile 0  — Start
+    (4, 1), // tile 1
+    (4, 2), // tile 2
+    (4, 3), // tile 3
+    (4, 4), // tile 4  — corner right→up
+    (3, 4), // tile 5
+    (2, 4), // tile 6
+    (1, 4), // tile 7  — corner up→left
+    (1, 3), // tile 8
+    (1, 2), // tile 9  — corner left→up
+    (0, 2), // tile 10
+    (0, 1), // tile 11
+    (0, 0), // tile 12 — corner left→down
+    (1, 0), // tile 13
+    (2, 0), // tile 14
+    (3, 0), // tile 15 — corner down→right
+  ];
+
+  final List<Map<String, String>> _complexTiles = const [
+    {'id': 'start',     'name': 'Start',        'kind': 'Start'},
+    {'id': 'prop_1',    'name': 'Med Ave',      'kind': 'OrdinaryProperty'},
+    {'id': 'chance_1',  'name': 'Chance',       'kind': 'Chance'},
+    {'id': 'prop_2',    'name': 'Baltic Ave',   'kind': 'OrdinaryProperty'},
+    {'id': 'tax_1',     'name': 'Income Tax',   'kind': 'Bank'},
+    {'id': 'prop_3',    'name': 'Oriental Ave', 'kind': 'OrdinaryProperty'},
+    {'id': 'rr_1',      'name': 'Reading RR',   'kind': 'OrdinaryProperty'},
+    {'id': 'corner_1',  'name': '↱ Up Turn',    'kind': 'Jail'},
+    {'id': 'chance_2',  'name': 'Community',    'kind': 'Chance'},
+    {'id': 'corner_2',  'name': '↰ Left Turn',  'kind': 'CardShop'},
+    {'id': 'prop_4',    'name': 'Vermont Ave',  'kind': 'OrdinaryProperty'},
+    {'id': 'prop_5',    'name': 'Conn Ave',     'kind': 'OrdinaryProperty'},
+    {'id': 'corner_3',  'name': '↖ Top',        'kind': 'Start'},
+    {'id': 'util_1',    'name': 'Electric Co',  'kind': 'ExtensionProperty'},
+    {'id': 'prop_6',    'name': 'St Charles',   'kind': 'OrdinaryProperty'},
+    {'id': 'corner_4',  'name': '↙ Down Turn',  'kind': 'Bank'},
+  ];
+
   // Default tile set for the built-in board
   final List<Map<String, String>> _defaultTiles = const [
     {'id': 'start', 'name': 'Start', 'kind': 'Start'},
@@ -210,7 +273,8 @@ class _GameScreenState extends State<GameScreen> {
     _currentState = _buildInitialState(2);
     _gameState = _buildGameState(_currentState);
     _landedTileIdThisTurn = null;
-    _addLog('Game started with ${_gameState.numPlayers} players');
+    final mapLabel = _useComplexBoard ? 'Complex L‑board' : 'Classic';
+    _addLog('Game started ($mapLabel) with ${_gameState.numPlayers} players');
   }
 
   @override
@@ -223,7 +287,9 @@ class _GameScreenState extends State<GameScreen> {
 
   /// Build the initial GameState JSON map for [numPlayers] players.
   Map<String, dynamic> _buildInitialState(int numPlayers) {
-    final tiles = _defaultTiles
+    // Pick tile source: complex or classic
+    final tileSource = _useComplexBoard ? _complexTiles : _defaultTiles;
+    final tiles = tileSource
         .map((t) => {
               'id': t['id'],
               'name': t['name'],
@@ -251,7 +317,7 @@ class _GameScreenState extends State<GameScreen> {
 
     // Build properties from tiles that are OrdinaryProperty
     final properties = <Map<String, dynamic>>[];
-    for (final tile in _defaultTiles) {
+    for (final tile in tileSource) {
       if (tile['kind'] == 'OrdinaryProperty') {
         properties.add({
           'tile_id': tile['id'],
@@ -262,6 +328,7 @@ class _GameScreenState extends State<GameScreen> {
           'upgrade_level': 0,
           'owner': null,
           'is_mortgaged': false,
+          'linked_targets': <String>[],
         });
       } else if (tile['kind'] == 'ExtensionProperty') {
         properties.add({
@@ -273,8 +340,18 @@ class _GameScreenState extends State<GameScreen> {
           'upgrade_level': 0,
           'owner': null,
           'is_mortgaged': false,
+          'linked_targets': <String>[],
         });
       }
+    }
+
+    // ── Auto-link rent for the complex L‑shaped board ────────────
+    if (_useComplexBoard) {
+      _computeAutoLinks(
+        tileSource,
+        properties,
+        _complexPositions,
+      );
     }
 
     return {
@@ -292,7 +369,122 @@ class _GameScreenState extends State<GameScreen> {
       'stock_market': null,
       'active_auction': null,
       'consecutive_doubles': 0,
+      'group_rent_enabled': _useComplexBoard, // enable group rent for test
     };
+  }
+
+  /// Auto-link rent computation — split by board edges first.
+  ///
+  /// Rule 1: groups only form within the same board edge (same direction).
+  /// We split the path at direction changes (detected via grid positions),
+  /// then process each edge independently.
+  void _computeAutoLinks(
+      List<Map<String, String>> tileSource,
+      List<Map<String, dynamic>> properties,
+      List<(int, int)> positions) {
+    bool isProp(int ti) =>
+        ti < tileSource.length &&
+        properties.any((p) => p['tile_id'] == tileSource[ti]['id']);
+
+    final manual = properties
+        .where((p) => (p['linked_targets'] as List).isNotEmpty)
+        .map((p) => p['tile_id'] as String)
+        .toSet();
+
+    // ── 0. Split path into edges at direction changes ──────────
+    // A direction change occurs when (Δrow, Δcol) differs between
+    // consecutive tile pairs.
+    final edges = <List<int>>[]; // each edge is a list of tile indices
+    if (positions.length < 2) return;
+
+    var currentEdge = <int>[0];
+    for (int i = 1; i < positions.length; i++) {
+      final pr = positions[i - 1].$1, pc = positions[i - 1].$2;
+      final cr = positions[i].$1, cc = positions[i].$2;
+      final dr = cr - pr, dc = cc - pc;
+
+      if (i < positions.length - 1) {
+        final nr = positions[i + 1].$1, nc = positions[i + 1].$2;
+        final ndr = nr - cr, ndc = nc - cc;
+        if (ndr != dr || ndc != dc) {
+          // Direction changes at tile i → end current edge here
+          currentEdge.add(i);
+          edges.add(List.from(currentEdge));
+          currentEdge = <int>[i];
+          continue;
+        }
+      }
+      currentEdge.add(i);
+    }
+    if (currentEdge.isNotEmpty) edges.add(currentEdge);
+
+    // ── 1..3. Process each edge independently ───────────────────
+    for (final edge in edges) {
+      final edgeRuns = <List<String>>[];
+
+      // Find contiguous property runs within this edge
+      int ei = 0;
+      while (ei < edge.length) {
+        final ti = edge[ei];
+        final tid = tileSource[ti]['id']!;
+        if (!isProp(ti) || manual.contains(tid)) {
+          ei++;
+          continue;
+        }
+        final run = <String>[tid];
+        ei++;
+        while (ei < edge.length) {
+          final nti = edge[ei];
+          final nid = tileSource[nti]['id']!;
+          if (!isProp(nti) || manual.contains(nid)) break;
+          run.add(nid);
+          ei++;
+        }
+        if (run.isNotEmpty) edgeRuns.add(run);
+      }
+
+      // Merge runs within this edge (gap=1, total≥3)
+      final merged = <List<String>>[];
+      int ri = 0;
+      while (ri < edgeRuns.length) {
+        final cluster = <String>[...edgeRuns[ri]];
+        ri++;
+        while (ri < edgeRuns.length) {
+          final lastId = cluster.last;
+          final nextId = edgeRuns[ri].first;
+          int gap = 0;
+          bool counting = false;
+          for (final t in tileSource) {
+            if (t['id'] == lastId) {
+              counting = true;
+              continue;
+            }
+            if (t['id'] == nextId) break;
+            if (counting) gap++;
+          }
+          final total = cluster.length + edgeRuns[ri].length;
+          if (gap != 1 || total < 3) break;
+          cluster.addAll(edgeRuns[ri]);
+          ri++;
+        }
+        merged.add(cluster);
+      }
+
+      // Set linked_targets (max 5)
+      for (final group in merged) {
+        final g = group.length > 5 ? group.sublist(0, 5) : group;
+        if (g.length < 2) continue;
+        for (final tid in g) {
+          final prop = properties.firstWhere(
+            (p) => p['tile_id'] == tid,
+            orElse: () => <String, dynamic>{},
+          );
+          if (prop.isNotEmpty) {
+            prop['linked_targets'] = g.where((id) => id != tid).toList();
+          }
+        }
+      }
+    }
   }
 
   /// Build a [GameStateData] from a raw state JSON map.
@@ -756,6 +948,211 @@ class _GameScreenState extends State<GameScreen> {
     _addLog('Player upgraded $tileId');
   }
 
+  /// Show a detailed property information dialog.
+  void _showPropertyDetailDialog(String tileId) {
+    final rawTiles = (_currentState['board'] as Map<String, dynamic>?)?
+            ['tiles'] as List<dynamic>? ??
+        [];
+    final tileData = rawTiles.cast<Map<String, dynamic>>().firstWhere(
+      (t) => t['id'] == tileId,
+      orElse: () => <String, dynamic>{},
+    );
+    if (tileData.isEmpty) return;
+
+    final tileName = (tileData['name'] as String?) ?? tileId;
+    final tileKind = (tileData['kind'] as String?) ?? 'Unknown';
+
+    final properties = (_currentState['board'] as Map<String, dynamic>?)?
+            ['properties'] as List<dynamic>? ??
+        [];
+    final propData = properties.cast<Map<String, dynamic>>().firstWhere(
+      (p) => p['tile_id'] == tileId,
+      orElse: () => <String, dynamic>{},
+    );
+    final isProperty = propData.isNotEmpty;
+
+    // Owner
+    final ownerId = isProperty ? propData['owner'] as String? : null;
+    String ownerLabel;
+    Color ownerColor;
+    if (ownerId != null) {
+      final playerIdx = int.tryParse(ownerId.replaceAll('player_', '')) ?? 0;
+      const colors = [
+        Color(0xFFD32F2F), Color(0xFF1976D2), Color(0xFF388E3C),
+        Color(0xFFFBC02D), Color(0xFF8E24AA), Color(0xFFFF6F00),
+      ];
+      ownerColor = colors[playerIdx % colors.length];
+      final players = _gameState.players;
+      ownerLabel = playerIdx < players.length
+          ? players[playerIdx].name
+          : 'Player $playerIdx';
+    } else {
+      ownerColor = Colors.grey;
+      ownerLabel = isProperty ? 'Unowned' : 'N/A';
+    }
+
+    final level =
+        isProperty ? ((propData['upgrade_level'] as num?)?.toInt() ?? 0) : 0;
+    final basePrice =
+        isProperty ? ((propData['base_price'] as num?)?.toInt() ?? 0) : 0;
+    final rentList = isProperty
+        ? (propData['rent'] as List<dynamic>?)
+                ?.map((e) => (e as num).toInt())
+                .toList() ??
+            <int>[]
+        : <int>[];
+    final baseRent = rentList.isNotEmpty ? rentList[0] : (basePrice ~/ 10);
+    final currentRent = baseRent * (1 + level) ~/ 10;
+
+    // Group rent
+    int groupRent = 0;
+    int groupCount = 1;
+    final linkedTargets = isProperty
+        ? (propData['linked_targets'] as List<dynamic>?)
+                ?.map((e) => e as String)
+                .toList() ??
+            <String>[]
+        : <String>[];
+    if (_currentState['group_rent_enabled'] == true &&
+        linkedTargets.isNotEmpty && ownerId != null) {
+      groupCount = 1;
+      for (final target in linkedTargets) {
+        final tp = properties.cast<Map<String, dynamic>>().firstWhere(
+          (p) => p['tile_id'] == target,
+          orElse: () => <String, dynamic>{},
+        );
+        if (tp.isNotEmpty && tp['owner'] == ownerId) {
+          final tl = (tp['upgrade_level'] as num?)?.toInt() ?? 0;
+          final tr = (tp['rent'] as List<dynamic>?)
+                  ?.map((e) => (e as num).toInt())
+                  .toList() ??
+              <int>[];
+          final tb = (tp['base_price'] as num?)?.toInt() ?? 0;
+          final tbr = tr.isNotEmpty ? tr[0] : (tb ~/ 10);
+          groupRent += tbr * (1 + tl) ~/ 10;
+          groupCount++;
+        }
+      }
+      groupRent += currentRent; // include this property's own rent
+    }
+
+    final upgradeCost = baseRent * (1 + level) ~/ 2;
+    final maxLevel =
+        (_currentState['max_upgrade_level'] as num?)?.toInt() ?? 3;
+    final canUpgrade = ownerId != null && level < maxLevel;
+
+    // ── Tile color chip ──────────────────────────────────────
+    Color tileColor;
+    try {
+      tileColor = BoardTileViewModel(id: tileId, name: tileName, kind: tileKind).color;
+    } catch (_) {
+      tileColor = Colors.grey;
+    }
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Row(children: [
+          Container(
+            width: 14, height: 14,
+            decoration: BoxDecoration(
+              color: tileColor,
+              shape: BoxShape.rectangle,
+              borderRadius: BorderRadius.circular(3),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(tileName,
+                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                overflow: TextOverflow.ellipsis),
+          ),
+        ]),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _detailRow('Type', tileKind),
+            const Divider(height: 10),
+            if (isProperty) ...[
+              _detailRow('Owner', ownerLabel,
+                  valueColor: ownerId != null ? ownerColor : null),
+              _detailRow('Level', level > 0 ? '$level ★' : '0 (base)'),
+              const Divider(height: 10),
+              _detailRow('Base Price', '\$$basePrice'),
+              _detailRow('Rent (current)', '\$$currentRent',
+                  valueColor: Colors.red.shade700),
+              if (groupRent > 0)
+                _detailRow('Group Rent (×$groupCount)',
+                    '\$$groupRent',
+                    valueColor: Colors.deepOrange),
+              const Divider(height: 10),
+              _detailRow('Upgrade Cost',
+                  canUpgrade ? '\$$upgradeCost' : 'Max level',
+                  valueColor:
+                      canUpgrade ? Colors.green.shade700 : Colors.grey),
+              if (linkedTargets.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                const Text('Linked group:',
+                    style: TextStyle(
+                        fontSize: 12, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 2),
+                ...linkedTargets.map((t) {
+                  final td = rawTiles.cast<Map<String, dynamic>>().firstWhere(
+                    (x) => x['id'] == t,
+                    orElse: () => <String, dynamic>{},
+                  );
+                  return Padding(
+                    padding: const EdgeInsets.only(left: 12, bottom: 1),
+                    child: Text('• ${td['name'] ?? t}',
+                        style: const TextStyle(fontSize: 12)),
+                  );
+                }),
+              ],
+            ] else ...[
+              _detailRow('Owner', 'N/A'),
+              const SizedBox(height: 4),
+              const Text('This tile is not a purchasable property.',
+                  style: TextStyle(fontSize: 12, color: Colors.grey)),
+            ],
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _detailRow(String label, String value, {Color? valueColor}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 110,
+            child: Text(label,
+                style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                    color: Colors.grey)),
+          ),
+          Expanded(
+            child: Text(value,
+                style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: valueColor ?? Colors.black87)),
+          ),
+        ],
+      ),
+    );
+  }
+
   /// Find a property definition at the given tile position.
   Map<String, dynamic>? _findPropertyAtTile(String tileId) {
     final properties =
@@ -1028,11 +1425,12 @@ class _GameScreenState extends State<GameScreen> {
     }
 
     final boardViewModel = BoardViewModel(
-      mapName: 'Classic',
+      mapName: _useComplexBoard ? 'Complex L-Board' : 'Classic',
       tiles: tiles,
       players: _gameState.players,
       activePlayerIndex: _gameState.activePlayerIndex,
       propertyOwners: propertyOwners,
+      perimeterPositions: _useComplexBoard ? _complexPositions : null,
     );
 
     return GameStateWidget(
@@ -1061,6 +1459,7 @@ class _GameScreenState extends State<GameScreen> {
                     children: [
                       IsometricBoardWidget(
                         viewModel: boardViewModel,
+                        onTileTap: (result) => _showPropertyDetailDialog(result.tileId),
                       ),
                       // Minimap overlay
                       Positioned(
@@ -1068,9 +1467,12 @@ class _GameScreenState extends State<GameScreen> {
                         right: 4,
                         child: MinimapWidget(
                           viewModel: boardViewModel,
-                          gridSize: tiles.length >= 4
-                              ? ((tiles.length - 4) ~/ 4) + 2
-                              : 11,
+                          gridSize: _useComplexBoard && boardViewModel.perimeterPositions != null
+                              ? boardViewModel.perimeterPositions!
+                                  .fold< int>(0, (m, p) => p.$1 > m ? p.$1 : m) + 1
+                              : (tiles.length >= 4
+                                  ? ((tiles.length - 4) ~/ 4) + 2
+                                  : 11),
                           tileWidth: 60,
                           tileHeight: 60,
                           ownerColors: propertyOwners.map(
