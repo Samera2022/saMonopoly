@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'game_rules_screen.dart' show GameRulesScreen, PlayerSlotInfo;
+import 'map_models.dart' show MapMeta;
 
 // ============================================================================
 // Data model for a player slot
@@ -28,8 +29,13 @@ enum PlayerSlotType { human, bot, empty, waiting }
 
 class CharacterSelectionScreen extends StatefulWidget {
   final String mapId;
+  final MapMeta? mapMeta;
 
-  const CharacterSelectionScreen({super.key, required this.mapId});
+  const CharacterSelectionScreen({
+    super.key,
+    required this.mapId,
+    this.mapMeta,
+  });
 
   @override
   State<CharacterSelectionScreen> createState() =>

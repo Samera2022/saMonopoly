@@ -1,54 +1,11 @@
 import 'package:flutter/material.dart';
 
 import 'character_selection_screen.dart';
+import 'map_models.dart';
+import 'map_repository.dart';
 
 // ============================================================================
-// Data model for a map entry
-// ============================================================================
-
-class MapEntryData {
-  final String id;
-  final String name;
-  final String description;
-  final Color themeColor;
-  final int tileCount;
-
-  const MapEntryData({
-    required this.id,
-    required this.name,
-    required this.description,
-    required this.themeColor,
-    required this.tileCount,
-  });
-}
-
-/// Built-in map entries.
-const List<MapEntryData> kBuiltinMaps = [
-  MapEntryData(
-    id: 'classic',
-    name: '经典大富翁',
-    description: '标准 40 格经典大富翁地图，包含完整的物业、机会卡和特殊地块。',
-    themeColor: Color(0xFF2E7D32),
-    tileCount: 40,
-  ),
-  MapEntryData(
-    id: 'l_shaped',
-    name: 'L 形测试板',
-    description: '非标准的 L 形自定义布局，用于测试复杂路径和拐角渲染。',
-    themeColor: Color(0xFF1565C0),
-    tileCount: 16,
-  ),
-  MapEntryData(
-    id: 'mini',
-    name: '迷你地图',
-    description: '精简版 20 格地图，适合快速对局体验。',
-    themeColor: Color(0xFFE65100),
-    tileCount: 20,
-  ),
-];
-
-// ============================================================================
-// Map Selection Screen – 3D card stacking with smooth transitions
+// Map Selection Screen – 3D card stacking with real map data
 // ============================================================================
 
 class MapSelectionScreen extends StatefulWidget {
@@ -61,11 +18,15 @@ class MapSelectionScreen extends StatefulWidget {
 class _MapSelectionScreenState extends State<MapSelectionScreen>
     with TickerProviderStateMixin {
   late final PageController _pageController;
-  late final AnimationController _bgBlurController;
   int _currentPage = 0;
-  double _pageOffset = 0.0;
 
-  final List<MapEntryData> _maps = kBuiltinMaps;
+  /// Repository managing built-in + external maps.
+  final MapRepository _repository = MapRepository();
+
+  /// Loading state.
+  bool _isLoading = true;
+  String? _loadError;
+  String _mapsDirectoryPath = '';
 
   @override
   void initState() {
@@ -73,23 +34,39 @@ class _MapSelectionScreenState extends State<MapSelectionScreen>
     _pageController = PageController(viewportFraction: 0.70);
     _pageController.addListener(() {
       setState(() {
-        _pageOffset = _pageController.page ?? 0;
         _currentPage = _pageController.page?.round() ?? 0;
       });
     });
-    _bgBlurController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 400),
-    );
-    _bgBlurController.forward();
+    _loadMaps();
   }
 
   @override
   void dispose() {
     _pageController.dispose();
-    _bgBlurController.dispose();
     super.dispose();
   }
+
+  /// Load maps from all sources.
+  Future<void> _loadMaps() async {
+    try {
+      await _repository.initialize(locale: 'zh');
+      final dirPath = await _repository.getMapsDirectoryPath();
+
+      if (!mounted) return;
+      setState(() {
+        _isLoading = false;
+        _mapsDirectoryPath = dirPath;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loadError = e.toString();
+        _isLoading = false;
+      });
+    }
+  }
+
+  List<MapMeta> get _maps => _repository.maps;
 
   @override
   Widget build(BuildContext context) {
@@ -97,85 +74,204 @@ class _MapSelectionScreenState extends State<MapSelectionScreen>
       body: Container(
         width: double.infinity,
         height: double.infinity,
-        decoration: BoxDecoration(
+        decoration: const BoxDecoration(
           gradient: LinearGradient(
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
             colors: [
-              const Color(0xFF1B1B2F),
-              const Color(0xFF162447),
-              const Color(0xFF1B1B2F),
+              Color(0xFF1B1B2F),
+              Color(0xFF162447),
+              Color(0xFF1B1B2F),
             ],
           ),
         ),
         child: SafeArea(
-          child: Column(
+          child: _isLoading
+              ? const Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      CircularProgressIndicator(color: Colors.white54),
+                      SizedBox(height: 16),
+                      Text('正在加载地图...',
+                          style: TextStyle(color: Colors.white54)),
+                    ],
+                  ),
+                )
+              : _loadError != null
+                  ? _buildErrorView()
+                  : _maps.isEmpty
+                      ? _buildEmptyView()
+                      : _buildContent(),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildErrorView() {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.error_outline, color: Colors.redAccent, size: 48),
+          const SizedBox(height: 12),
+          const Text('加载地图失败',
+              style: TextStyle(color: Colors.white70, fontSize: 18)),
+          const SizedBox(height: 8),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 40),
+            child: Text(
+              _loadError!,
+              style: const TextStyle(color: Colors.white38, fontSize: 12),
+              textAlign: TextAlign.center,
+            ),
+          ),
+          const SizedBox(height: 20),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              // ── Header ────────────────────────────────────────────────
-              Padding(
-                padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
-                child: Row(
-                  children: [
-                    IconButton(
-                      icon: const Icon(Icons.arrow_back_rounded,
-                          color: Colors.white70),
-                      onPressed: () => Navigator.of(context).pop(),
-                    ),
-                    const Spacer(),
-                    const Text(
-                      '选择地图',
-                      style: TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.white,
-                      ),
-                    ),
-                    const Spacer(),
-                    const SizedBox(width: 48), // balance
-                  ],
+              OutlinedButton.icon(
+                onPressed: () {
+                  setState(() {
+                    _isLoading = true;
+                    _loadError = null;
+                  });
+                  _loadMaps();
+                },
+                icon: const Icon(Icons.refresh),
+                label: const Text('重试'),
+                style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.white70),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildEmptyView() {
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.symmetric(horizontal: 40),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.map_outlined, color: Colors.white38, size: 48),
+            const SizedBox(height: 12),
+            const Text('未找到地图',
+                style: TextStyle(color: Colors.white70, fontSize: 18)),
+            const SizedBox(height: 8),
+            Text(
+              '将 .smap 文件放入外部地图目录即可自动加载',
+              style: TextStyle(color: Colors.white.withOpacity(0.50)),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 16),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.08),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: SelectableText(
+                _mapsDirectoryPath,
+                style: TextStyle(
+                  fontSize: 11,
+                  color: Colors.white.withOpacity(0.45),
+                  fontFamily: 'monospace',
                 ),
               ),
-              const SizedBox(height: 12),
+            ),
+            const SizedBox(height: 20),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: () {
+                    setState(() {
+                      _isLoading = true;
+                    });
+                    _loadMaps();
+                  },
+                  icon: const Icon(Icons.refresh, size: 18),
+                  label: const Text('刷新'),
+                  style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.white70),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
-              // ── 3D Card Stack ─────────────────────────────────────────
-              Expanded(
-                child: Stack(
-                  alignment: Alignment.center,
-                  children: [
-                    // Background blur layer
-                    _buildBlurBackground(),
-                    // PageView for card stacking
-                    PageView.builder(
-                      controller: _pageController,
-                      itemCount: _maps.length,
-                      onPageChanged: (index) {
-                        setState(() => _currentPage = index);
-                      },
-                      itemBuilder: (context, index) {
-                        return _buildMapCard(index);
-                      },
-                    ),
-                    // Left navigation arrow
-                    Positioned(
-                      left: 4,
-                      child: _buildNavArrow(Icons.chevron_left_rounded, -1),
-                    ),
-                    // Right navigation arrow
-                    Positioned(
-                      right: 4,
-                      child: _buildNavArrow(Icons.chevron_right_rounded, 1),
-                    ),
-                  ],
+  Widget _buildContent() {
+    return Column(
+      children: [
+        // ── Header ────────────────────────────────────────────────
+        Padding(
+          padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+          child: Row(
+            children: [
+              IconButton(
+                icon:
+                    const Icon(Icons.arrow_back_rounded, color: Colors.white70),
+                onPressed: () => Navigator.of(context).pop(),
+              ),
+              const Spacer(),
+              const Text(
+                '选择地图',
+                style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.white,
                 ),
               ),
-
-              // ── Bottom info + action ──────────────────────────────────
-              _buildBottomInfo(context),
-              const SizedBox(height: 16),
+              const Spacer(),
+              const SizedBox(width: 48),
             ],
           ),
         ),
-      ),
+        const SizedBox(height: 12),
+
+        // ── 3D Card Stack ─────────────────────────────────────────
+        Expanded(
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              // Background blur layer
+              _buildBlurBackground(),
+              // PageView for card stacking
+              PageView.builder(
+                controller: _pageController,
+                itemCount: _maps.length,
+                onPageChanged: (index) {
+                  setState(() => _currentPage = index);
+                },
+                itemBuilder: (context, index) {
+                  return _buildMapCard(index);
+                },
+              ),
+              // Left navigation arrow
+              Positioned(
+                left: 4,
+                child: _buildNavArrow(Icons.chevron_left_rounded, -1),
+              ),
+              // Right navigation arrow
+              Positioned(
+                right: 4,
+                child: _buildNavArrow(Icons.chevron_right_rounded, 1),
+              ),
+            ],
+          ),
+        ),
+
+        // ── Bottom info + action ──────────────────────────────────
+        _buildBottomInfo(context),
+        const SizedBox(height: 16),
+      ],
     );
   }
 
@@ -205,12 +301,13 @@ class _MapSelectionScreenState extends State<MapSelectionScreen>
   /// Build a single map card with 3D stacking transform.
   Widget _buildMapCard(int index) {
     final map = _maps[index];
-    final pageOffset = _pageOffset - index;
+    final page = _pageController.hasClients ? _pageController.page ?? 0 : 0.0;
+    final pageOffset = page - index;
     // Scale: center = 1.0, sides = 0.80
     final scale = 1.0 - (pageOffset.abs() * 0.20).clamp(0.0, 0.20);
     // Opacity: center = 1.0, sides = 0.50
     final opacity = 1.0 - (pageOffset.abs() * 0.50).clamp(0.0, 0.50);
-    // Elevation (y translation): center = 0, sides offset downward
+    // Y translation for depth
     final translateY = 20.0 * pageOffset.abs();
     // Rotation for depth effect
     final rotateY = pageOffset * 0.15;
@@ -225,19 +322,16 @@ class _MapSelectionScreenState extends State<MapSelectionScreen>
           );
         }
       },
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 50),
-        child: Opacity(
-          opacity: opacity,
-          child: Transform(
-            alignment: Alignment.center,
-            transform: Matrix4.identity()
-              ..setEntry(3, 2, 0.001) // perspective
-              ..rotateY(rotateY)
-              ..translate(0.0, translateY)
-              ..scale(scale),
-            child: _MapCardContent(map: map, isActive: index == _currentPage),
-          ),
+      child: Opacity(
+        opacity: opacity,
+        child: Transform(
+          alignment: Alignment.center,
+          transform: Matrix4.identity()
+            ..setEntry(3, 2, 0.001) // perspective
+            ..rotateY(rotateY)
+            ..translate(0.0, translateY)
+            ..scale(scale),
+          child: _MapCardContent(map: map, isActive: index == _currentPage),
         ),
       ),
     );
@@ -286,7 +380,7 @@ class _MapSelectionScreenState extends State<MapSelectionScreen>
       children: [
         // Map name
         Text(
-          map.name,
+          map.displayName,
           style: const TextStyle(
             fontSize: 24,
             fontWeight: FontWeight.bold,
@@ -303,7 +397,7 @@ class _MapSelectionScreenState extends State<MapSelectionScreen>
             borderRadius: BorderRadius.circular(12),
           ),
           child: Text(
-            '${map.tileCount} 格 | ${map.id}',
+            '${map.tileCount} 格 | ${map.id} v${map.version}',
             style: TextStyle(
               fontSize: 12,
               color: Colors.white.withOpacity(0.60),
@@ -315,7 +409,9 @@ class _MapSelectionScreenState extends State<MapSelectionScreen>
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 40),
           child: Text(
-            map.description,
+            map.description.isNotEmpty
+                ? map.description
+                : '${map.tileCount} 个图块，${map.propertyCount} 个地产',
             textAlign: TextAlign.center,
             style: TextStyle(
               fontSize: 13,
@@ -330,7 +426,8 @@ class _MapSelectionScreenState extends State<MapSelectionScreen>
           onPressed: () {
             Navigator.of(context).push(
               MaterialPageRoute(
-                builder: (_) => CharacterSelectionScreen(mapId: map.id),
+                builder: (_) =>
+                    CharacterSelectionScreen(mapId: map.id, mapMeta: map),
               ),
             );
           },
@@ -355,7 +452,7 @@ class _MapSelectionScreenState extends State<MapSelectionScreen>
 // ============================================================================
 
 class _MapCardContent extends StatelessWidget {
-  final MapEntryData map;
+  final MapMeta map;
   final bool isActive;
 
   const _MapCardContent({required this.map, required this.isActive});
@@ -385,30 +482,37 @@ class _MapCardContent extends StatelessWidget {
               borderRadius: BorderRadius.circular(20),
               child: Stack(
                 children: [
-                  // ── Background (map thumbnail representation) ─────────
-                  Container(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                        colors: [
-                          map.themeColor.withOpacity(0.60),
-                          map.themeColor.withOpacity(0.30),
-                          Colors.white.withOpacity(0.10),
-                        ],
-                      ),
-                    ),
-                  ),
-                  // Decorative grid pattern (simulating board tiles)
+                  // ── Background: thumbnail image or procedural fallback ──
+                  if (map.resolvedThumbnailPath != null)
+                    // Real thumbnail image
+                    Image.asset(
+                      map.resolvedThumbnailPath!,
+                      width: cardWidth,
+                      height: cardHeight,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, __, ___) =>
+                          _buildProceduralBackground(),
+                    )
+                  else
+                    _buildProceduralBackground(),
+
+                  // ── Scrim overlay for text readability ────────────
                   Positioned.fill(
-                    child: CustomPaint(
-                      painter: _MapThumbnailPainter(
-                        themeColor: map.themeColor,
-                        tileCount: map.tileCount,
+                    child: Container(
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                          colors: [
+                            Colors.transparent,
+                            Colors.black.withOpacity(0.40),
+                          ],
+                        ),
                       ),
                     ),
                   ),
-                  // Map name overlay
+
+                  // Map name overlay at bottom
                   Positioned(
                     bottom: 0,
                     left: 0,
@@ -430,7 +534,7 @@ class _MapCardContent extends StatelessWidget {
                         children: [
                           Expanded(
                             child: Text(
-                              map.name,
+                              map.displayName,
                               style: const TextStyle(
                                 fontSize: 20,
                                 fontWeight: FontWeight.bold,
@@ -465,10 +569,39 @@ class _MapCardContent extends StatelessWidget {
       },
     );
   }
+
+  /// Fallback procedural background when no thumbnail is available.
+  Widget _buildProceduralBackground() {
+    return Stack(
+      children: [
+        Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                map.themeColor.withOpacity(0.60),
+                map.themeColor.withOpacity(0.30),
+                Colors.white.withOpacity(0.10),
+              ],
+            ),
+          ),
+        ),
+        Positioned.fill(
+          child: CustomPaint(
+            painter: _MapThumbnailPainter(
+              themeColor: map.themeColor,
+              tileCount: map.tileCount,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
 }
 
 // ============================================================================
-// Map Thumbnail Painter – draws a simplified board representation
+// Map Thumbnail Painter
 // ============================================================================
 
 class _MapThumbnailPainter extends CustomPainter {
@@ -498,11 +631,11 @@ class _MapThumbnailPainter extends CustomPainter {
       ..strokeWidth = 2.0;
     canvas.drawRRect(boardRect, borderPaint);
 
-    // Draw some tile indicators along the perimeter
+    // Draw tile indicators along the perimeter
     final tilesPerSide = ((tileCount - 4) / 4).ceil();
     final sideLength = boardSize / (tilesPerSide + 1);
 
-    // Bottom row tiles
+    // Bottom row
     for (var i = 0; i < tilesPerSide + 1; i++) {
       final x = margin + i * sideLength;
       final y = margin + boardSize - sideLength;
@@ -542,23 +675,15 @@ class _MapThumbnailPainter extends CustomPainter {
       );
     }
 
-    // Center "S" logo
-    final textPaint = Paint()
-      ..color = Colors.white.withOpacity(0.20)
-      ..style = PaintingStyle.fill;
+    // Center S logo
     final center = Offset(size.width / 2, size.height / 2);
-    canvas.drawCircle(center, boardSize * 0.12, textPaint);
-
-    // Draw "S" using simple lines
     final sPaint = Paint()
       ..color = Colors.white.withOpacity(0.25)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 3.0;
     final sSize = boardSize * 0.08;
-    final sCenter = center;
-    // Simplified S shape
     canvas.drawArc(
-      Rect.fromCenter(center: sCenter, width: sSize, height: sSize),
+      Rect.fromCenter(center: center, width: sSize, height: sSize),
       -3.14 / 2,
       3.14,
       false,
@@ -566,7 +691,7 @@ class _MapThumbnailPainter extends CustomPainter {
     );
     canvas.drawArc(
       Rect.fromCenter(
-          center: Offset(sCenter.dx, sCenter.dy + sSize * 0.25),
+          center: Offset(center.dx, center.dy + sSize * 0.25),
           width: sSize,
           height: sSize),
       3.14 / 2,
@@ -578,5 +703,6 @@ class _MapThumbnailPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _MapThumbnailPainter oldDelegate) =>
-      oldDelegate.themeColor != themeColor || oldDelegate.tileCount != tileCount;
+      oldDelegate.themeColor != themeColor ||
+      oldDelegate.tileCount != tileCount;
 }

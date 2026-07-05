@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 
 import 'board_view.dart';
 import 'home_screen.dart';
+import 'save_manager.dart';
+import 'save_manager.dart';
 import 'bridge_client.dart';
 import 'card_inventory_dialog.dart';
 import 'card_shop_dialog.dart';
@@ -114,12 +116,20 @@ class GameScreen extends StatefulWidget {
   final int? initialPlayerCount;
   final List<String>? playerNames;
   final List<bool>? aiFlags;
+  /// Map ID from the map selection screen. When 'classic', uses the 40-tile
+  /// classic board; otherwise falls through to the complex/L-shaped board.
+  final String? mapId;
+  /// Raw game state to load from a save file. When set, this state is used
+  /// directly instead of building a fresh initial state.
+  final Map<String, dynamic>? initialState;
 
   const GameScreen({
     super.key,
     this.initialPlayerCount,
     this.playerNames,
     this.aiFlags,
+    this.mapId,
+    this.initialState,
   });
 
   @override
@@ -175,7 +185,9 @@ class _GameScreenState extends State<GameScreen> {
 
   /// Set to `true` to use the complex L-shaped test board instead of the
   /// classic rectangular 40-tile layout.
-  bool _useComplexBoard = true;
+  /// Controlled by [widget.mapId]: 'classic' → false (use classic 40-tile),
+  /// anything else → true (use complex L-shaped test board).
+  late bool _useComplexBoard;
 
   // ── Complex L‑shaped test board ─────────────────────────────────────────
   //
@@ -289,34 +301,49 @@ class _GameScreenState extends State<GameScreen> {
     {'id': 'prop_22',   'name': 'Boardwalk',          'kind': 'OrdinaryProperty'},
   ];
 
+  final SaveManager _saveManager = SaveManager();
+
   @override
   void initState() {
     super.initState();
     _pack = sampleClassicPack();
 
-    // Determine player count from parameters or default to 2
-    final playerCount = widget.initialPlayerCount ?? 2;
-    _currentState = _buildInitialState(playerCount);
-    _gameState = _buildGameState(_currentState);
-    _landedTileIdThisTurn = null;
+    // Map selection: 'classic' uses the 40-tile board, anything else uses
+    // the complex L-shaped test board for development/testing.
+    _useComplexBoard = widget.mapId != 'classic';
 
-    // Apply custom player names and AI flags if provided
-    if (widget.playerNames != null || widget.aiFlags != null) {
-      final players = _currentState['players'] as List<Map<String, dynamic>>;
-      for (var i = 0; i < players.length && i < playerCount; i++) {
-        if (widget.playerNames != null && i < widget.playerNames!.length) {
-          players[i]['name'] = widget.playerNames![i];
+    if (widget.initialState != null) {
+      // ── Load from save ──────────────────────────────────────────────
+      _currentState = Map<String, dynamic>.from(widget.initialState!);
+      _gameState = _buildGameState(_currentState, lastEvent: 'Game restored');
+      _landedTileIdThisTurn = null;
+      final mapLabel = _useComplexBoard ? 'Complex L‑board' : 'Classic';
+      _addLog('Game restored from save ($mapLabel) with ${_gameState.numPlayers} players');
+    } else {
+      // ── Fresh game ──────────────────────────────────────────────────
+      final playerCount = widget.initialPlayerCount ?? 2;
+      _currentState = _buildInitialState(playerCount);
+      _gameState = _buildGameState(_currentState);
+      _landedTileIdThisTurn = null;
+
+      // Apply custom player names and AI flags if provided
+      if (widget.playerNames != null || widget.aiFlags != null) {
+        final players = _currentState['players'] as List<Map<String, dynamic>>;
+        for (var i = 0; i < players.length && i < playerCount; i++) {
+          if (widget.playerNames != null && i < widget.playerNames!.length) {
+            players[i]['name'] = widget.playerNames![i];
+          }
+          if (widget.aiFlags != null && i < widget.aiFlags!.length) {
+            players[i]['is_ai'] = widget.aiFlags![i];
+          }
         }
-        if (widget.aiFlags != null && i < widget.aiFlags!.length) {
-          players[i]['is_ai'] = widget.aiFlags![i];
-        }
+        _currentState['players'] = players;
+        _gameState = _buildGameState(_currentState, lastEvent: 'Game initialized');
       }
-      _currentState['players'] = players;
-      _gameState = _buildGameState(_currentState, lastEvent: 'Game initialized');
-    }
 
-    final mapLabel = _useComplexBoard ? 'Complex L‑board' : 'Classic';
-    _addLog('Game started ($mapLabel) with ${_gameState.numPlayers} players');
+      final mapLabel = _useComplexBoard ? 'Complex L‑board' : 'Classic';
+      _addLog('Game started ($mapLabel) with ${_gameState.numPlayers} players');
+    }
   }
 
   @override
@@ -1055,6 +1082,35 @@ class _GameScreenState extends State<GameScreen> {
     _addLog('Chance: $msg');
   }
 
+  /// Save the current game state to disk.
+  Future<void> _onSaveGame() async {
+    final name = await _saveManager.saveGame(state: _currentState);
+    if (!mounted) return;
+    if (name != null) {
+      _addLog('Game saved: $name');
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('游戏已保存: $name'),
+            duration: const Duration(seconds: 2),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } else {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('保存失败'),
+            backgroundColor: Colors.redAccent,
+            duration: Duration(seconds: 2),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    }
+  }
+
   Future<void> _onEndTurn() async {
     final response = await _bridgeClient.executeCommand(
       command: BridgeCommand.endTurn(),
@@ -1616,6 +1672,12 @@ class _GameScreenState extends State<GameScreen> {
         appBar: AppBar(
           title: const Text('saMonopoly'),
           actions: [
+            // Save game
+            IconButton(
+              icon: const Icon(Icons.save_rounded),
+              tooltip: '保存游戏',
+              onPressed: _onSaveGame,
+            ),
             IconButton(
               icon: const Icon(Icons.settings),
               tooltip: 'Game Settings',

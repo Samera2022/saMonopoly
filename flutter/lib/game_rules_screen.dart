@@ -117,6 +117,7 @@ class _GameRulesScreenState extends State<GameRulesScreen> {
           initialPlayerCount: count,
           playerNames: names,
           aiFlags: aiFlags,
+          mapId: widget.mapId,
         ),
       ),
       (route) => false, // clear all previous routes

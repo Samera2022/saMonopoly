@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::discovery::BuildScriptConfig;
 use crate::map::MapDefinition;
+use crate::smap;
 
 // ============================================================================
 // Content pack
@@ -243,6 +244,25 @@ impl ContentLoader for JsonContentLoader {
                         Err(e) => {
                             eprintln!(
                                 "Warning: failed to load '{}': {}",
+                                path.display(),
+                                e
+                            );
+                        }
+                    }
+                } else if ext == "smap" {
+                    // Load .smap packages (ZIP with map.json inside)
+                    match smap::load_smap(&path) {
+                        Ok(result) => {
+                            let pack = ContentPack::new(&result.definition.id, &result.definition.version)
+                                .with_name(&result.definition.name_key)
+                                .add_map(result.definition);
+                            if catalog.register(pack).is_ok() {
+                                count += 1;
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "Warning: failed to load .smap '{}': {}",
                                 path.display(),
                                 e
                             );
