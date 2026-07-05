@@ -45,6 +45,15 @@ pub enum GameEvent {
     SharesSold { player_id: String, shares: u32, total_payout: i64, price_per_share: i64 },
     // Sprint 7: Game End
     GameWon { winner_id: String, remaining_players: u32 },
+    // Config
+    ConfigLoaded { config: serde_json::Value },
+    ConfigUpdated { section: String },
+    // Lottery
+    LotteryAvailable { ticket_price: i64, jackpot: i64, next_draw_turn: u64 },
+    LotteryTicketBought { player_id: String, number: u32, ticket_price: i64 },
+    LotteryDrawResult { winning_number: u32, winner: Option<String>, prize: i64 },
+    // Card usage
+    CardUsed { player_id: String, card_id: String },
 }
 
 pub trait EventBus<E> {

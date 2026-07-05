@@ -215,6 +215,7 @@ mod tests {
             upgrade_level: 0,
             owner: None,
             is_mortgaged: false,
+            linked_targets: vec![],
         }
     }
 

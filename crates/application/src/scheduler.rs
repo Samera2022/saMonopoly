@@ -19,6 +19,8 @@ pub enum EffectKind {
     InterestAccrual,
     /// A custom / catch-all effect.
     Custom(String),
+    /// Lottery draw event (fires every 15 turns).
+    LotteryDraw,
 }
 
 /// A timed effect scheduled to fire at (or after) `trigger_turn`.

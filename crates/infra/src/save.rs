@@ -240,6 +240,10 @@ mod tests {
             stock_market: None,
             active_auction: None,
             consecutive_doubles: 0,
+            max_upgrade_level: 3,
+            extension_upgrade_enabled: false,
+            group_rent_enabled: false,
+            lottery_state: None,
         }
     }
 

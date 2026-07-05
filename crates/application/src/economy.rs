@@ -2,6 +2,8 @@ use sa_monopoly_domain::DomainError;
 use sa_monopoly_domain::GameState;
 use sa_monopoly_domain::Money;
 
+use crate::events::GameEvent;
+
 pub struct EconomyService;
 
 impl EconomyService {
@@ -43,12 +45,165 @@ impl EconomyService {
     }
 
     pub fn upgrade_property(state: &mut GameState, tile_id: &str) -> Result<u32, DomainError> {
+        use sa_monopoly_domain::property::PropertyKind;
+
+        // ─── Check max_upgrade_level (0 = disabled) ──────────────────────────
+        if state.max_upgrade_level == 0 {
+            return Err(DomainError::UpgradesDisabled);
+        }
+
+        // ─── Ownership check & kind validation ────────────────────────────────
+        let active_player_id = state
+            .active_player()
+            .map(|p| p.id.clone())
+            .ok_or(DomainError::ActivePlayerNotFound)?;
+
+        let (current_level, base) = {
+            let property = state
+                .board
+                .property(tile_id)
+                .ok_or_else(|| DomainError::TileNotFound(tile_id.to_string()))?;
+
+            // Only Ordinary properties can be upgraded by default.
+            // Extension (utility) properties can only be upgraded when the
+            // `extension_upgrade_enabled` flag is set.
+            match property.kind {
+                PropertyKind::Ordinary => { /* allowed */ }
+                PropertyKind::Extension if state.extension_upgrade_enabled => { /* allowed */ }
+                PropertyKind::Extension => {
+                    return Err(DomainError::InvalidCommand(
+                        "extension upgrades are disabled".to_string(),
+                    ));
+                }
+                _ => {
+                    return Err(DomainError::InvalidCommand(
+                        "only ordinary properties can be upgraded".to_string(),
+                    ));
+                }
+            }
+
+            // Verify ownership
+            if property.owner.as_deref() != Some(&active_player_id) {
+                return Err(DomainError::UpgradeNotOwned(tile_id.to_string()));
+            }
+
+            (property.upgrade_level, property.rent.first().copied().unwrap_or(property.base_price))
+        };
+
+        // ─── Max level check ──────────────────────────────────────────────────
+        let max_level = state.max_upgrade_level as u32;
+        if current_level >= max_level {
+            return Err(DomainError::MaxUpgradeLevel(
+                tile_id.to_string(),
+                max_level as u64,
+            ));
+        }
+
+        // ─── Deduct upgrade cost ──────────────────────────────────────────────
+        // cost = base * (1 + current_level) / 2
+        let cost = base * (1 + current_level as i64) / 2;
+
+        // Check affordability before mutating
+        let player = state
+            .players
+            .get(state.active_player_index)
+            .ok_or(DomainError::ActivePlayerNotFound)?;
+        if player.cash < cost {
+            return Err(DomainError::InsufficientFunds {
+                have: player.cash,
+                need: cost,
+            });
+        }
+
+        // ─── Apply upgrade ────────────────────────────────────────────────────
+        // Deduct cost from player
+        if let Some(player) = state.players.get_mut(state.active_player_index) {
+            player.cash -= cost;
+        }
+
+        // Increment upgrade level
         let property = state
             .board
             .property_mut(tile_id)
             .ok_or_else(|| DomainError::TileNotFound(tile_id.to_string()))?;
-        property.upgrade_level = property.upgrade_level.saturating_add(1);
+        property.upgrade_level = current_level + 1;
+
         Ok(property.upgrade_level)
+    }
+
+    /// Buy a lottery ticket: player chooses a number (1-50) and pays the
+    /// ticket price.
+    pub fn buy_lottery_ticket(
+        state: &mut GameState,
+        number: u32,
+    ) -> Result<GameEvent, String> {
+        crate::cards::LotteryService::buy_ticket(state, number)
+    }
+
+    /// Use a card from the active player's inventory.
+    pub fn use_card(state: &mut GameState, card_id: &str) -> Result<GameEvent, String> {
+        let player_id = state
+            .active_player()
+            .map(|p| p.id.clone())
+            .ok_or("no_active_player".to_string())?;
+
+        // Check that the player actually owns this card
+        let has_card = state
+            .players
+            .get(state.active_player_index)
+            .map(|p| p.owned_cards.iter().any(|c| c == card_id))
+            .unwrap_or(false);
+        if !has_card {
+            return Err("card not owned".to_string());
+        }
+
+        match card_id {
+            "get_out_of_jail" => {
+                // Auto-consumed by engine on roll; mark as used
+                if let Some(player) = state.players.get_mut(state.active_player_index) {
+                    player.owned_cards.retain(|c| c != card_id);
+                    player.jail_turns = 0;
+                }
+                Ok(GameEvent::CardUsed {
+                    player_id,
+                    card_id: card_id.to_string(),
+                })
+            }
+            "bonus_200" => {
+                // Auto-consumed by engine on roll; manually use here
+                if let Some(player) = state.players.get_mut(state.active_player_index) {
+                    player.owned_cards.retain(|c| c != card_id);
+                    player.cash += 200;
+                }
+                Ok(GameEvent::CardUsed {
+                    player_id,
+                    card_id: card_id.to_string(),
+                })
+            }
+            "double_rent" => {
+                // This card is auto-consumed during rent payment;
+                // manually mark as ready for next rent
+                if let Some(player) = state.players.get_mut(state.active_player_index) {
+                    player.owned_cards.retain(|c| c != card_id);
+                }
+                Ok(GameEvent::CardUsed {
+                    player_id,
+                    card_id: card_id.to_string(),
+                })
+            }
+            "skip_turn" => {
+                // Skip the next turn by setting jail_turns = 1 (skip without jail)
+                if let Some(player) = state.players.get_mut(state.active_player_index) {
+                    player.owned_cards.retain(|c| c != card_id);
+                    player.jail_turns = 1;
+                }
+                Ok(GameEvent::CardUsed {
+                    player_id,
+                    card_id: card_id.to_string(),
+                })
+            }
+            _ => Err("unknown card".to_string()),
+        }
     }
 
     pub fn pay_rent(state: &mut GameState, tile_id: &str) -> Result<(Money, bool), DomainError> {
@@ -63,7 +218,14 @@ impl EconomyService {
             .as_ref()
             .ok_or_else(|| DomainError::PropertyNotOwned(tile_id.to_string()))?
             .clone();
-        let mut amount = property.current_rent();
+
+        // If group rent is enabled, check if the player owns all properties
+        // in the same linked group and sum their rents.
+        let mut amount = if state.group_rent_enabled {
+            state.board.group_rent(tile_id).unwrap_or_else(|| property.current_rent())
+        } else {
+            property.current_rent()
+        };
 
         // ─── Double Rent card check ─────────────────────────────────────────────
         // If the paying player has a "double_rent" card, consume it and double the

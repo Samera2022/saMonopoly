@@ -5,9 +5,13 @@ import 'package:flutter/material.dart';
 
 import 'board_view.dart';
 import 'bridge_client.dart';
+import 'card_inventory_dialog.dart';
+import 'card_shop_dialog.dart';
+import 'config_provider.dart';
 import 'content_pack.dart';
 import 'content_pack_loader.dart';
 import 'isometric_board.dart';
+import 'lottery_dialog.dart';
 
 // ============================================================================
 // Game state management (simple InheritedWidget)
@@ -132,10 +136,18 @@ class _GameScreenState extends State<GameScreen> {
   int _animDice1 = 1;
   int _animDice2 = 1;
 
+  // ---- Config provider -----------------------------------------------------
+  final ConfigProvider _configProvider = ConfigProvider();
+
   // ---- Turn state ----------------------------------------------------------
   /// Number of rolls remaining for the current active player this turn.
   /// Default: 1. Re-rolls when die=6 add another roll.
   int _rollsRemainingThisTurn = 1;
+
+  /// The tile the active player just landed on this turn after rolling.
+  /// `null` if they haven't rolled yet this turn or the turn has ended.
+  /// Used to prevent Buy/Upgrade without having just arrived at the tile.
+  String? _landedTileIdThisTurn;
 
   // Player colours
   static const List<Color> _playerColors = [
@@ -197,6 +209,7 @@ class _GameScreenState extends State<GameScreen> {
     _pack = sampleClassicPack();
     _currentState = _buildInitialState(2);
     _gameState = _buildGameState(_currentState);
+    _landedTileIdThisTurn = null;
     _addLog('Game started with ${_gameState.numPlayers} players');
   }
 
@@ -274,7 +287,7 @@ class _GameScreenState extends State<GameScreen> {
       'ruleset': {'id': 'classic', 'version': '0.1.0'},
       'current_turn': 0,
       'active_player_index': 0,
-      'seed': 42,
+      'seed': DateTime.now().microsecondsSinceEpoch,
       'decks': [],
       'stock_market': null,
       'active_auction': null,
@@ -416,6 +429,10 @@ class _GameScreenState extends State<GameScreen> {
         _currentState['players'][_gameState.activePlayerIndex]['position'];
     await _resolveTileEffect(playerPos);
 
+    // Record which tile the player just landed on (buy/upgrade only allowed
+    // on the turn they first arrive).
+    _landedTileIdThisTurn = playerPos;
+
     // Decrement rolls remaining; if single die shows 6, grant re-roll
     _rollsRemainingThisTurn--;
     // Single die mode: die face = dice1 (simulated as dice1%6+1)
@@ -426,10 +443,20 @@ class _GameScreenState extends State<GameScreen> {
     }
     setState(() {}); // refresh button state
 
-    // Check if player landed on a purchasable property
+    // Check if player landed on a purchasable or own upgradable property
     final property = _findPropertyAtTile(playerPos);
-    if (property != null && property['owner'] == null) {
-      _showBuyPropertyDialog(playerPos, property);
+    if (property != null) {
+      final owner = property['owner'] as String?;
+      final playerId = _gameState.players[_gameState.activePlayerIndex].id;
+      if (owner == null) {
+        _showBuyPropertyDialog(playerPos, property);
+      } else if (owner == playerId) {
+        final maxLevel = (_currentState['max_upgrade_level'] as num?)?.toInt() ?? 3;
+        final currentLevel = (property['upgrade_level'] as num?)?.toInt() ?? 0;
+        if (maxLevel > 0 && currentLevel < maxLevel) {
+          _showUpgradePropertyDialog(playerPos, property);
+        }
+      }
     }
   }
 
@@ -484,9 +511,96 @@ class _GameScreenState extends State<GameScreen> {
         }
         break;
 
+      case 'CardShop':
+        await _showCardShopDialog();
+        break;
+
+      case 'Lottery':
+        await _showLotteryPickerDialog();
+        break;
+
       default:
         break;
     }
+  }
+
+  Future<void> _onBuyCard(String cardId, int price) async {
+    final response = await _bridgeClient.executeCommand(
+      command: BridgeCommand.buyCard(cardId, price),
+      currentState: _currentState,
+    );
+    setState(() {
+      _currentState = response.state;
+      _gameState = _buildGameState(response.state, lastEvent: 'Bought $cardId');
+    });
+    _addLog('Bought card: $cardId');
+  }
+
+  Future<void> _onUseCard(String cardId) async {
+    final response = await _bridgeClient.executeCommand(
+      command: BridgeCommand(type: 'UseCard', params: {'card_id': cardId}),
+      currentState: _currentState,
+    );
+    setState(() {
+      _currentState = response.state;
+      _gameState = _buildGameState(response.state, lastEvent: 'Used $cardId');
+    });
+    _addLog('Used card: $cardId');
+  }
+
+  Future<void> _onBuyLotteryTicket(int number) async {
+    final response = await _bridgeClient.executeCommand(
+      command: BridgeCommand(
+          type: 'BuyLotteryTicket', params: {'number': number}),
+      currentState: _currentState,
+    );
+    setState(() {
+      _currentState = response.state;
+      _gameState =
+          _buildGameState(response.state, lastEvent: 'Lottery #$number');
+    });
+    _addLog('Bought lottery ticket #$number');
+  }
+
+  Future<void> _showCardShopDialog() async {
+    final player = _gameState.players[_gameState.activePlayerIndex];
+    if (!mounted) return;
+    await showDialog(
+      context: context,
+      builder: (ctx) => CardShopDialog(
+        playerCash: player.cash,
+        onBuy: (cardId, price) => _onBuyCard(cardId, price),
+      ),
+    );
+  }
+
+  void _showCardInventoryDialog() {
+    final player = _gameState.players[_gameState.activePlayerIndex];
+    final ownedCards = BridgeClient.parsePlayers(_currentState)
+        .firstWhere((p) => p.id == player.id)
+        .ownedCards;
+    showDialog(
+      context: context,
+      builder: (ctx) => CardInventoryDialog(
+        ownedCardIds: ownedCards,
+        onUse: (cardId) => _onUseCard(cardId),
+      ),
+    );
+  }
+
+  Future<void> _showLotteryPickerDialog() async {
+    // In simulation mode, show a simple UI with default values
+    if (!mounted) return;
+    await showDialog(
+      context: context,
+      builder: (ctx) => LotteryPickerDialog(
+        jackpot: 500,
+        ticketPrice: 50,
+        nextDrawTurn: 15,
+        alreadyPicked: false,
+        onPick: (number) => _onBuyLotteryTicket(number),
+      ),
+    );
   }
 
   void _deductCash(int playerIdx, int amount) {
@@ -606,6 +720,7 @@ class _GameScreenState extends State<GameScreen> {
         lastEvent: 'Turn ended',
       );
       _rollsRemainingThisTurn = 1;
+      _landedTileIdThisTurn = null;
     });
     _addLog(
         'Turn ${_gameState.currentTurn} — Player ${_gameState.activePlayerIndex + 1}\'s turn');
@@ -624,6 +739,21 @@ class _GameScreenState extends State<GameScreen> {
       );
     });
     _addLog('Player bought $tileId');
+  }
+
+  Future<void> _onUpgradeProperty(String tileId) async {
+    final response = await _bridgeClient.executeCommand(
+      command: BridgeCommand.upgradeProperty(tileId),
+      currentState: _currentState,
+    );
+    setState(() {
+      _currentState = response.state;
+      _gameState = _buildGameState(
+        response.state,
+        lastEvent: 'Upgraded $tileId',
+      );
+    });
+    _addLog('Player upgraded $tileId');
   }
 
   /// Find a property definition at the given tile position.
@@ -681,6 +811,45 @@ class _GameScreenState extends State<GameScreen> {
                   }
                 : null,
             child: const Text('Buy'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Skip'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showUpgradePropertyDialog(String tileId, Map<String, dynamic> property) {
+    final currentLevel = (property['upgrade_level'] as num?)?.toInt() ?? 0;
+    final basePrice = (property['base_price'] as num).toInt();
+    final base = (property['rent'] as List<dynamic>?)?.isNotEmpty == true
+        ? ((property['rent'] as List<dynamic>).first as num).toInt()
+        : basePrice;
+    // upgrade_cost = base * (1 + current_level) / 2
+    final cost = base * (1 + currentLevel) ~/ 2;
+    final player = _gameState.players[_gameState.activePlayerIndex];
+    final canAfford = player.cash >= cost;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Upgrade Property'),
+        content: Text(
+          'Current level: $currentLevel\n'
+          'Upgrade cost: \$$cost\n\n'
+          'Your cash: \$${player.cash}',
+        ),
+        actions: [
+          FilledButton(
+            onPressed: canAfford
+                ? () {
+                    Navigator.of(ctx).pop();
+                    _onUpgradeProperty(tileId);
+                  }
+                : null,
+            child: const Text('Upgrade'),
           ),
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(),
@@ -792,39 +961,13 @@ class _GameScreenState extends State<GameScreen> {
     );
   }
 
-  void _showCardShopDialog() {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Card Shop'),
-        content: const Text(
-          'Available cards:\n'
-          '• Get Out of Jail Free — \$50\n'
-          '• Double Rent — \$30\n'
-          '• Bonus \$200 — \$100\n'
-          '• Skip Turn — \$20',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('Close'),
-          ),
-          FilledButton(
-            onPressed: () {
-              Navigator.of(ctx).pop();
-              _addLog('Card purchased from shop');
-            },
-            child: const Text('Buy Card'),
-          ),
-        ],
-      ),
-    );
-  }
+  // (Replaced by _showCardShopDialog above)
 
   void _showSettingsDialog() {
     showDialog(
       context: context,
       builder: (ctx) => _GameSettingsDialog(
+        configProvider: _configProvider,
         initialPlayerCount: _gameState.numPlayers,
         onStart: (count, playerNames, aiFlags) {
           Navigator.of(ctx).pop();
@@ -1111,21 +1254,41 @@ class _GameScreenState extends State<GameScreen> {
               : 'Roll'),
         ),
         const SizedBox(height: 4),
-        // Buy property
+        // Buy / Upgrade property — only allowed on the turn the player
+        // first arrives at this tile (prevents camping and re-upgrading).
         OutlinedButton.icon(
-          onPressed: isMyTurn ? () {
+          onPressed: (isMyTurn && _landedTileIdThisTurn != null) ? () {
             final pos = _gameState
                 .players[_gameState.activePlayerIndex]
                 .tileId;
+            // Only allow if the player is still on the tile they just landed on
+            if (pos != _landedTileIdThisTurn) {
+              _addLog('You must roll to reach this tile first');
+              return;
+            }
             final prop = _findPropertyAtTile(pos);
-            if (prop != null && prop['owner'] == null) {
-              _showBuyPropertyDialog(pos, prop);
+            if (prop != null) {
+              final owner = prop['owner'] as String?;
+              final playerId = _gameState.players[_gameState.activePlayerIndex].id;
+              if (owner == null) {
+                _showBuyPropertyDialog(pos, prop);
+              } else if (owner == playerId) {
+                final maxLevel = (_currentState['max_upgrade_level'] as num?)?.toInt() ?? 3;
+                final currentLevel = (prop['upgrade_level'] as num?)?.toInt() ?? 0;
+                if (maxLevel > 0 && currentLevel < maxLevel) {
+                  _showUpgradePropertyDialog(pos, prop);
+                } else {
+                  _addLog('Property already at max level');
+                }
+              } else {
+                _addLog('This property belongs to another player');
+              }
             } else {
-              _addLog('No property to buy here');
+              _addLog('No property here');
             }
           } : null,
-          icon: const Icon(Icons.shopping_cart, size: 18),
-          label: const Text('Buy'),
+          icon: const Icon(Icons.build, size: 18),
+          label: const Text('Buy / Upgrade'),
         ),
         const SizedBox(height: 4),
         // Trade
@@ -1135,11 +1298,11 @@ class _GameScreenState extends State<GameScreen> {
           label: const Text('Trade'),
         ),
         const SizedBox(height: 4),
-        // Card shop
+        // Card inventory
         OutlinedButton.icon(
-          onPressed: () => _showCardShopDialog(),
-          icon: const Icon(Icons.style, size: 18),
-          label: const Text('Card Shop'),
+          onPressed: () => _showCardInventoryDialog(),
+          icon: const Icon(Icons.inventory_2, size: 18),
+          label: const Text('Inventory'),
         ),
         const SizedBox(height: 4),
         // End turn
@@ -1201,11 +1364,13 @@ class _GameScreenState extends State<GameScreen> {
 // ============================================================================
 
 class _GameSettingsDialog extends StatefulWidget {
+  final ConfigProvider configProvider;
   final int initialPlayerCount;
   final void Function(
       int count, List<String> names, List<bool> aiFlags) onStart;
 
   const _GameSettingsDialog({
+    required this.configProvider,
     required this.initialPlayerCount,
     required this.onStart,
   });
@@ -1214,14 +1379,46 @@ class _GameSettingsDialog extends StatefulWidget {
   State<_GameSettingsDialog> createState() => _GameSettingsDialogState();
 }
 
-class _GameSettingsDialogState extends State<_GameSettingsDialog> {
+class _GameSettingsDialogState extends State<_GameSettingsDialog>
+    with SingleTickerProviderStateMixin {
   late int _playerCount;
   late List<TextEditingController> _nameControllers;
   late List<bool> _aiFlags;
+  late TabController _tabController;
+
+  // ── App config controllers ───────────────────────────────────────────────
+  late TextEditingController _languageCtrl;
+  late TextEditingController _themeCtrl;
+
+  // ── Game config controllers ──────────────────────────────────────────────
+  late TextEditingController _startCashCtrl;
+  late TextEditingController _maxPlayersCtrl;
+  late TextEditingController _passBonusCtrl;
+  late TextEditingController _jailTurnsCtrl;
+  late TextEditingController _hospitalTurnsCtrl;
+  late TextEditingController _maxUpgradeCtrl;
+  bool _extensionUpgradeEnabled = false;
+  bool _groupRentEnabled = false;
+  bool _stockMarketEnabled = false;
+  bool _lotteryEnabled = false;
+  bool _auctionEnabled = true;
+  bool _mortgageEnabled = true;
+  bool _tradeEnabled = true;
+
+  // ── Network config controllers ───────────────────────────────────────────
+  late TextEditingController _hostCtrl;
+  late TextEditingController _portCtrl;
+  bool _tlsEnabled = false;
 
   @override
   void initState() {
     super.initState();
+    _tabController = TabController(length: 3, vsync: this);
+
+    final app = widget.configProvider.app;
+    final game = widget.configProvider.game;
+    final network = widget.configProvider.network;
+
     _playerCount = widget.initialPlayerCount;
     _nameControllers = List.generate(
       _playerCount,
@@ -1229,15 +1426,51 @@ class _GameSettingsDialogState extends State<_GameSettingsDialog> {
     );
     _aiFlags = List.generate(
       _playerCount,
-      (i) => i > 0, // default: first player human, rest AI
+      (i) => i > 0,
     );
+
+    _languageCtrl = TextEditingController(text: app.language);
+    _themeCtrl = TextEditingController(text: app.theme);
+    _startCashCtrl =
+        TextEditingController(text: game.startingCash.toString());
+    _maxPlayersCtrl =
+        TextEditingController(text: game.maxPlayers.toString());
+    _passBonusCtrl =
+        TextEditingController(text: game.passStartBonus.toString());
+    _jailTurnsCtrl =
+        TextEditingController(text: game.jailEscapeTurns.toString());
+    _hospitalTurnsCtrl =
+        TextEditingController(text: game.hospitalRecoveryTurns.toString());
+    _maxUpgradeCtrl =
+        TextEditingController(text: game.maxUpgradeLevel.toString());
+    _extensionUpgradeEnabled = game.extensionUpgradeEnabled;
+    _groupRentEnabled = game.groupRentEnabled;
+    _stockMarketEnabled = game.stockMarketEnabled;
+    _lotteryEnabled = game.lotteryEnabled;
+    _auctionEnabled = game.auctionEnabled;
+    _mortgageEnabled = game.mortgageEnabled;
+    _tradeEnabled = game.tradeEnabled;
+    _hostCtrl = TextEditingController(text: network.host);
+    _portCtrl = TextEditingController(text: network.port.toString());
+    _tlsEnabled = network.tls;
   }
 
   @override
   void dispose() {
+    _tabController.dispose();
     for (final c in _nameControllers) {
       c.dispose();
     }
+    _languageCtrl.dispose();
+    _themeCtrl.dispose();
+    _startCashCtrl.dispose();
+    _maxPlayersCtrl.dispose();
+    _passBonusCtrl.dispose();
+    _jailTurnsCtrl.dispose();
+    _hospitalTurnsCtrl.dispose();
+    _maxUpgradeCtrl.dispose();
+    _hostCtrl.dispose();
+    _portCtrl.dispose();
     super.dispose();
   }
 
@@ -1259,91 +1492,63 @@ class _GameSettingsDialogState extends State<_GameSettingsDialog> {
     });
   }
 
+  void _saveConfig() {
+    widget.configProvider.updateApp(AppConfig(
+      language: _languageCtrl.text,
+      theme: _themeCtrl.text,
+    ));
+    widget.configProvider.updateGame(GameConfig(
+      startingCash: int.tryParse(_startCashCtrl.text) ?? 1500,
+      maxPlayers: int.tryParse(_maxPlayersCtrl.text) ?? 4,
+      passStartBonus: int.tryParse(_passBonusCtrl.text) ?? 200,
+      jailEscapeTurns: int.tryParse(_jailTurnsCtrl.text) ?? 3,
+      hospitalRecoveryTurns: int.tryParse(_hospitalTurnsCtrl.text) ?? 2,
+      maxUpgradeLevel: int.tryParse(_maxUpgradeCtrl.text) ?? 3,
+      extensionUpgradeEnabled: _extensionUpgradeEnabled,
+      groupRentEnabled: _groupRentEnabled,
+      stockMarketEnabled: _stockMarketEnabled,
+      lotteryEnabled: _lotteryEnabled,
+      auctionEnabled: _auctionEnabled,
+      mortgageEnabled: _mortgageEnabled,
+      tradeEnabled: _tradeEnabled,
+    ));
+    widget.configProvider.updateNetwork(NetworkConfig(
+      host: _hostCtrl.text,
+      port: int.tryParse(_portCtrl.text) ?? 9000,
+      tls: _tlsEnabled,
+    ));
+  }
+
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: const Text('Game Settings'),
+      title: const Text('Settings'),
       content: SizedBox(
-        width: double.maxFinite,
-        child: ListView(
-          shrinkWrap: true,
+        width: 380,
+        height: 440,
+        child: Column(
           children: [
-            // Player count
-            Row(
-              children: [
-                const Text('Players:'),
-                const Spacer(),
-                IconButton(
-                  onPressed:
-                      _playerCount > 2 ? () => _updatePlayerCount(_playerCount - 1) : null,
-                  icon: const Icon(Icons.remove_circle_outline),
-                ),
-                Text(
-                  '$_playerCount',
-                  style: const TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                IconButton(
-                  onPressed:
-                      _playerCount < 6 ? () => _updatePlayerCount(_playerCount + 1) : null,
-                  icon: const Icon(Icons.add_circle_outline),
-                ),
+            TabBar(
+              controller: _tabController,
+              tabs: const [
+                Tab(text: 'Players'),
+                Tab(text: 'Rules'),
+                Tab(text: 'Network'),
               ],
             ),
-            const Divider(),
-
-            // Player configurations
-            for (var i = 0; i < _playerCount; i++) ...[
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(8.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          CircleAvatar(
-                            backgroundColor: _playerColors[
-                                i % _playerColors.length],
-                            radius: 12,
-                            child: Text(
-                              '${i + 1}',
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 12,
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: TextField(
-                              controller: _nameControllers[i],
-                              decoration: const InputDecoration(
-                                labelText: 'Name',
-                                isDense: true,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      SwitchListTile(
-                        title: const Text('AI Player'),
-                        subtitle: Text(
-                            _aiFlags[i] ? 'Computer controlled' : 'Human'),
-                        value: _aiFlags[i],
-                        dense: true,
-                        contentPadding: EdgeInsets.zero,
-                        onChanged: (v) => setState(() => _aiFlags[i] = v),
-                      ),
-                    ],
-                  ),
-                ),
+            Expanded(
+              child: TabBarView(
+                controller: _tabController,
+                children: [
+                  // ── Tab 1: Players ─────────────────────────────────────
+                  _buildPlayersTab(),
+                  // ── Tab 2: Game Rules ──────────────────────────────────
+                  _buildRulesTab(),
+                  // ── Tab 3: Network ─────────────────────────────────────
+                  _buildNetworkTab(),
+                ],
               ),
-              const SizedBox(height: 4),
-            ],
+            ),
           ],
         ),
       ),
@@ -1354,6 +1559,7 @@ class _GameSettingsDialogState extends State<_GameSettingsDialog> {
         ),
         FilledButton(
           onPressed: () {
+            _saveConfig();
             widget.onStart(
               _playerCount,
               _nameControllers.map((c) => c.text).toList(),
@@ -1361,6 +1567,229 @@ class _GameSettingsDialogState extends State<_GameSettingsDialog> {
             );
           },
           child: const Text('Start Game'),
+        ),
+      ],
+    );
+  }
+
+  // ── Tab builders ─────────────────────────────────────────────────────────
+
+  Widget _buildPlayersTab() {
+    return ListView(
+      children: [
+        // Player count
+        Row(
+          children: [
+            const Text('Players:'),
+            const Spacer(),
+            IconButton(
+              onPressed: _playerCount > 2
+                  ? () => _updatePlayerCount(_playerCount - 1)
+                  : null,
+              icon: const Icon(Icons.remove_circle_outline),
+            ),
+            Text(
+              '$_playerCount',
+              style: const TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            IconButton(
+              onPressed: _playerCount < 6
+                  ? () => _updatePlayerCount(_playerCount + 1)
+                  : null,
+              icon: const Icon(Icons.add_circle_outline),
+            ),
+          ],
+        ),
+        const Divider(),
+        for (var i = 0; i < _playerCount; i++) ...[
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(8.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      CircleAvatar(
+                        backgroundColor:
+                            _playerColors[i % _playerColors.length],
+                        radius: 12,
+                        child: Text(
+                          '${i + 1}',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: TextField(
+                          controller: _nameControllers[i],
+                          decoration: const InputDecoration(
+                            labelText: 'Name',
+                            isDense: true,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  SwitchListTile(
+                    title: const Text('AI Player'),
+                    subtitle: Text(
+                        _aiFlags[i] ? 'Computer controlled' : 'Human'),
+                    value: _aiFlags[i],
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    onChanged: (v) => setState(() => _aiFlags[i] = v),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 4),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildRulesTab() {
+    return ListView(
+      children: [
+        TextField(
+          controller: _startCashCtrl,
+          decoration: const InputDecoration(
+            labelText: 'Starting Cash (\$)',
+            isDense: true,
+          ),
+          keyboardType: TextInputType.number,
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: _passBonusCtrl,
+          decoration: const InputDecoration(
+            labelText: 'Pass Start Bonus (\$)',
+            isDense: true,
+          ),
+          keyboardType: TextInputType.number,
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: _jailTurnsCtrl,
+          decoration: const InputDecoration(
+            labelText: 'Jail Turns',
+            isDense: true,
+          ),
+          keyboardType: TextInputType.number,
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: _hospitalTurnsCtrl,
+          decoration: const InputDecoration(
+            labelText: 'Hospital Turns',
+            isDense: true,
+          ),
+          keyboardType: TextInputType.number,
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: _maxUpgradeCtrl,
+          decoration: const InputDecoration(
+            labelText: 'Max Upgrade Level (0 = disabled)',
+            isDense: true,
+            helperText: 'Rent & cost calculated by formula',
+            helperMaxLines: 1,
+          ),
+          keyboardType: TextInputType.number,
+        ),
+        const SizedBox(height: 12),
+        SwitchListTile(
+          title: const Text('Utility Upgrades'),
+          subtitle: const Text('Allow upgrading Electric Co / Water Works'),
+          value: _extensionUpgradeEnabled,
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          onChanged: (v) => setState(() => _extensionUpgradeEnabled = v),
+        ),
+        const SizedBox(height: 4),
+        SwitchListTile(
+          title: const Text('Group Rent'),
+          subtitle: const Text('Sum rent when full group owned'),
+          value: _groupRentEnabled,
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          onChanged: (v) => setState(() => _groupRentEnabled = v),
+        ),
+        const SizedBox(height: 4),
+        SwitchListTile(
+          title: const Text('Stock Market'),
+          value: _stockMarketEnabled,
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          onChanged: (v) => setState(() => _stockMarketEnabled = v),
+        ),
+        SwitchListTile(
+          title: const Text('Lottery'),
+          value: _lotteryEnabled,
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          onChanged: (v) => setState(() => _lotteryEnabled = v),
+        ),
+        SwitchListTile(
+          title: const Text('Auctions'),
+          value: _auctionEnabled,
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          onChanged: (v) => setState(() => _auctionEnabled = v),
+        ),
+        SwitchListTile(
+          title: const Text('Mortgages'),
+          value: _mortgageEnabled,
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          onChanged: (v) => setState(() => _mortgageEnabled = v),
+        ),
+        SwitchListTile(
+          title: const Text('Trading'),
+          value: _tradeEnabled,
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          onChanged: (v) => setState(() => _tradeEnabled = v),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildNetworkTab() {
+    return ListView(
+      children: [
+        TextField(
+          controller: _hostCtrl,
+          decoration: const InputDecoration(
+            labelText: 'Host',
+            isDense: true,
+          ),
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: _portCtrl,
+          decoration: const InputDecoration(
+            labelText: 'Port',
+            isDense: true,
+          ),
+          keyboardType: TextInputType.number,
+        ),
+        const SizedBox(height: 12),
+        SwitchListTile(
+          title: const Text('TLS'),
+          value: _tlsEnabled,
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          onChanged: (v) => setState(() => _tlsEnabled = v),
         ),
       ],
     );

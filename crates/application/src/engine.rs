@@ -645,6 +645,34 @@ impl GameEngine {
                 }
                 event
             }
+            // ─── Config commands (handled at bridge level) ─────────────────────
+            GameCommand::ConfigGet => {
+                GameEvent::CommandRejected {
+                    reason: "config_not_available_in_engine".to_string(),
+                }
+            }
+            GameCommand::ConfigSet { section: _, value: _ } => {
+                GameEvent::CommandRejected {
+                    reason: "config_not_available_in_engine".to_string(),
+                }
+            }
+
+            // ─── Lottery ───────────────────────────────────────────────────────
+            GameCommand::BuyLotteryTicket { number } => {
+                match EconomyService::buy_lottery_ticket(state, number) {
+                    Ok(event) => event,
+                    Err(reason) => GameEvent::CommandRejected { reason },
+                }
+            }
+
+            // ─── Use Card ──────────────────────────────────────────────────────
+            GameCommand::UseCard { card_id } => {
+                match EconomyService::use_card(state, &card_id) {
+                    Ok(event) => event,
+                    Err(reason) => GameEvent::CommandRejected { reason },
+                }
+            }
+
             // ─── Bid ───────────────────────────────────────────────────────────
             GameCommand::Bid {
                 player_id,

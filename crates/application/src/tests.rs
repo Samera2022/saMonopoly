@@ -53,6 +53,7 @@ fn make_property(tile_id: &str, price: i64) -> Property {
         upgrade_level: 0,
         owner: None,
         is_mortgaged: false,
+        linked_targets: vec![],
     }
 }
 
@@ -109,6 +110,10 @@ fn test_state() -> GameState {
         stock_market: None,
         active_auction: None,
         consecutive_doubles: 0,
+        max_upgrade_level: 3,
+        extension_upgrade_enabled: false,
+        group_rent_enabled: false,
+        lottery_state: None,
     }
 }
 
