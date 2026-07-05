@@ -16,12 +16,17 @@ class CardShopItem {
 }
 
 /// Predefined cards available at the card shop.
+///
+/// Prices MUST match the server-side constants in [crate::engine::CARD_PRICES].
+/// The engine rejects any purchase with a mismatched price.
+/// `skip_turn` is excluded because its effect (skip own turn) is strictly
+/// detrimental; it may be re-added with a reworked effect in the future.
 const List<CardShopItem> kCardShopItems = [
   CardShopItem(
     id: 'get_out_of_jail',
     name: 'Get Out of Jail',
     description: 'Exit jail immediately',
-    price: 50,
+    price: 150,
   ),
   CardShopItem(
     id: 'bonus_200',
@@ -33,13 +38,7 @@ const List<CardShopItem> kCardShopItems = [
     id: 'double_rent',
     name: 'Double Rent',
     description: 'Next rent payment is doubled',
-    price: 30,
-  ),
-  CardShopItem(
-    id: 'skip_turn',
-    name: 'Skip Turn',
-    description: 'Make an opponent skip their next turn',
-    price: 20,
+    price: 200,
   ),
 ];
 

@@ -9,6 +9,21 @@ use crate::economy::EconomyService;
 use crate::events::GameEvent;
 use crate::movement::MovementService;
 
+/// Server-side card prices enforced by the engine.
+/// Any `BuyCard` command with a price deviating from these values is rejected,
+/// preventing malicious clients from buying cards at arbitrary prices.
+const CARD_PRICES: &[(&str, i64)] = &[
+    ("get_out_of_jail", 150),
+    ("bonus_200", 100),
+    ("double_rent", 200),
+    ("skip_turn", 50),
+];
+
+/// Look up the official price of a card by its ID.
+fn card_price(card_id: &str) -> Option<i64> {
+    CARD_PRICES.iter().find(|&&(id, _)| id == card_id).map(|&(_, p)| p)
+}
+
 pub struct GameEngine;
 
 impl GameEngine {
@@ -29,14 +44,14 @@ impl GameEngine {
                 let dice1 = (rng.next_u64() % 6) + 1;
                 let dice2 = (rng.next_u64() % 6) + 1;
                 let steps = (dice1 + dice2) as usize;
-                let is_doubles = dice1 == dice2;
+                let is_seven = dice1 + dice2 == 7;
 
                 let active_idx = state.active_player_index;
+                let pid = player_id.clone().unwrap_or_default();
 
                 // ─── Get Out of Jail card check ──────────────────────────────────
-                // Before the jail/hospital skip, check if player can use card to
-                // get out immediately.
-                let pid_for_release = player_id.clone().unwrap_or_default();
+                // Before jail/hospital handling, check if player can use card to
+                // get out immediately (trumps everything).
                 let can_use_get_out_of_jail = state
                     .players
                     .get(active_idx)
@@ -45,36 +60,27 @@ impl GameEngine {
 
                 if can_use_get_out_of_jail {
                     if let Some(p) = state.players.get_mut(active_idx) {
-                        p.owned_cards.retain(|c| c != "get_out_of_jail");
+                        // Remove only ONE copy (player may hold duplicates)
+                        if let Some(pos) = p.owned_cards.iter().position(|c| c == "get_out_of_jail") {
+                            p.owned_cards.swap_remove(pos);
+                        }
                         p.jail_turns = 0;
                     }
                     return GameEvent::CardConsumed {
-                        player_id: pid_for_release,
+                        player_id: pid,
                         card_id: "get_out_of_jail".to_string(),
                     };
                 }
 
-                // Check if player is in jail or hospital → skip turn (decrement counter)
+                // Check player status
                 let status = state
                     .players
                     .get(active_idx)
                     .map(|p| (p.jail_turns, p.hospital_turns))
                     .unwrap_or((0, 0));
 
-                if status.0 > 0 {
-                    let pid = player_id.clone().unwrap_or_default();
-                    if let Some(p) = state.players.get_mut(active_idx) {
-                        p.jail_turns = p.jail_turns.saturating_sub(1);
-                        if p.jail_turns == 0 {
-                            return GameEvent::PlayerReleasedFromJail { player_id: pid };
-                        }
-                    }
-                    return GameEvent::CommandRejected {
-                        reason: "player_in_jail".to_string(),
-                    };
-                }
+                // ─── Hospital skip (no dice, just wait) ──────────────────────────
                 if status.1 > 0 {
-                    let pid = player_id.clone().unwrap_or_default();
                     if let Some(p) = state.players.get_mut(active_idx) {
                         p.hospital_turns = p.hospital_turns.saturating_sub(1);
                         if p.hospital_turns == 0 {
@@ -84,6 +90,38 @@ impl GameEngine {
                     return GameEvent::CommandRejected {
                         reason: "player_in_hospital".to_string(),
                     };
+                }
+
+                // ─── Jail: roll sum-7 to get out ─────────────────────────────────
+                // In classic Monopoly, a player in jail can still roll. If they roll
+                // a sum of 7 (this game's "doubles" equivalent), they are released
+                // and move that many steps. Otherwise they serve their turn in jail.
+                if status.0 > 0 {
+                    if is_seven {
+                        // Rolled 7 → released! Move and clear jail turns.
+                        if let Some(p) = state.players.get_mut(active_idx) {
+                            p.jail_turns = 0;
+                        }
+                    } else {
+                        // Did NOT roll 7 → stay jailed, decrement counter.
+                        if let Some(p) = state.players.get_mut(active_idx) {
+                            p.jail_turns = p.jail_turns.saturating_sub(1);
+                        }
+                        let still_jailed = state.players.get(active_idx)
+                            .map(|p| p.jail_turns > 0)
+                            .unwrap_or(false);
+                        if still_jailed {
+                            return GameEvent::DiceRolled {
+                                dice1,
+                                dice2,
+                                is_seven,
+                                consecutive: 0,
+                            };
+                        } else {
+                            // This was the last turn in jail → released (no movement)
+                            return GameEvent::PlayerReleasedFromJail { player_id: pid };
+                        }
+                    }
                 }
 
                 // ─── Movement ──────────────────────────────────────────────────────
@@ -97,17 +135,18 @@ impl GameEngine {
                         }
                     }
 
-                    // ─── Sprint 4: Doubles tracking ────────────────────────────────
-                    if is_doubles {
+                    // ─── Sum-7 tracking (replaces standard doubles) ────────────────
+                    if is_seven {
                         state.consecutive_doubles += 1;
                     } else {
                         state.consecutive_doubles = 0;
                     }
 
-                    // 3 consecutive doubles → go to jail (no tile effect)
-                    if is_doubles && state.consecutive_doubles >= 3 {
+                    // 3 consecutive sum-7 rolls → go to jail (no tile effect)
+                    if is_seven && state.consecutive_doubles >= 3 {
                         state.consecutive_doubles = 0;
-                        // Clone jail tile ID before mutable borrow
+                        // Clone values before any mutable borrow
+                        let abuse = state.bail_abuse_count;
                         let jail_tile_id = state
                             .board
                             .tiles
@@ -115,7 +154,8 @@ impl GameEngine {
                             .find(|t| t.kind == TileKind::Jail)
                             .map(|t| t.id.clone());
                         if let Some(player) = state.active_player_mut() {
-                            player.jail_turns = 3;
+                            // Base 3 turns + prior bail abuses
+                            player.jail_turns = 3 + abuse;
                             if let Some(jail_id) = jail_tile_id {
                                 player.position = jail_id;
                             }
@@ -123,8 +163,8 @@ impl GameEngine {
                         return GameEvent::ThreeDoublesToJail { player_id: pid };
                     }
 
-                    // ─── Tile effect resolution ─────────────────────────────────────
-                    let tile_event =
+                    // ─── Tile effect resolution (side effects on state) ────────────
+                    let _tile_event =
                         EffectResolver::resolve_special_tile(state, &result.to, rng);
 
                     // ─── Sprint 4: Bankruptcy check after tile effect ───────────────
@@ -137,7 +177,10 @@ impl GameEngine {
                     // CardConsumed event.
                     if let Some(player) = state.active_player_mut() {
                         if player.owned_cards.iter().any(|c| c == "bonus_200") {
-                            player.owned_cards.retain(|c| c != "bonus_200");
+                            // Remove only ONE copy
+                            if let Some(pos) = player.owned_cards.iter().position(|c| c == "bonus_200") {
+                                player.owned_cards.swap_remove(pos);
+                            }
                             player.cash += 200;
                             return GameEvent::CardConsumed {
                                 player_id: pid,
@@ -147,17 +190,13 @@ impl GameEngine {
                     }
 
                     // ─── Determine return event ────────────────────────────────────
-                    if is_doubles {
-                        GameEvent::DoublesRolled {
-                            dice1,
-                            dice2,
-                            consecutive: state.consecutive_doubles,
-                        }
-                    } else {
-                        tile_event.unwrap_or(GameEvent::PlayerMoved {
-                            player_id: pid,
-                            to_tile: result.to,
-                        })
+                    // Always return DiceRolled so Flutter can read the dice values.
+                    // Tile effects are handled separately by the UI via _resolveTileEffect.
+                    GameEvent::DiceRolled {
+                        dice1,
+                        dice2,
+                        is_seven,
+                        consecutive: state.consecutive_doubles,
                     }
                 } else {
                     GameEvent::CommandRejected {
@@ -294,6 +333,23 @@ impl GameEngine {
                 if !valid_cards.contains(&card_id.as_str()) {
                     return GameEvent::CommandRejected {
                         reason: "invalid_card".to_string(),
+                    };
+                }
+
+                // Validate price matches server-side constant
+                let expected_price = match card_price(&card_id) {
+                    Some(p) => p,
+                    None => {
+                        return GameEvent::CommandRejected {
+                            reason: "invalid_card".to_string(),
+                        }
+                    }
+                };
+                if price != expected_price {
+                    return GameEvent::CommandRejected {
+                        reason: format!(
+                            "card price mismatch: expected {expected_price}, got {price}"
+                        ),
                     };
                 }
 
@@ -733,6 +789,64 @@ impl GameEngine {
                 active_auction.highest_bid = amount;
 
                 GameEvent::AuctionBid { player_id, amount }
+            }
+
+            // ─── Pay Bail ─────────────────────────────────────────────────────
+            // Cost = remaining_jail_turns × $50. Each bail use increments
+            // bail_abuse_count, adding +1 turn to every future jail term.
+            GameCommand::PayBail => {
+                const BAIL_RATE: i64 = 50;
+
+                let pid = match &player_id {
+                    Some(id) => id.clone(),
+                    None => {
+                        return GameEvent::CommandRejected {
+                            reason: "no_active_player".to_string(),
+                        }
+                    }
+                };
+
+                let jail_turns = match state.players.get(state.active_player_index) {
+                    Some(p) => p.jail_turns,
+                    None => {
+                        return GameEvent::CommandRejected {
+                            reason: "player_not_found".to_string(),
+                        }
+                    }
+                };
+
+                if jail_turns == 0 {
+                    return GameEvent::CommandRejected {
+                        reason: "not_in_jail".to_string(),
+                    };
+                }
+
+                let bail_cost = (jail_turns as i64) * BAIL_RATE;
+
+                // Check affordability
+                let can_afford = state
+                    .players
+                    .get(state.active_player_index)
+                    .map(|p| p.cash >= bail_cost)
+                    .unwrap_or(false);
+
+                if !can_afford {
+                    return GameEvent::CommandRejected {
+                        reason: "insufficient_funds".to_string(),
+                    };
+                }
+
+                // Deduct cash, release, and increment abuse counter
+                if let Some(player) = state.players.get_mut(state.active_player_index) {
+                    player.cash -= bail_cost;
+                    player.jail_turns = 0;
+                }
+                state.bail_abuse_count += 1;
+
+                GameEvent::BailPaid {
+                    player_id: pid,
+                    amount: bail_cost,
+                }
             }
         }
     }

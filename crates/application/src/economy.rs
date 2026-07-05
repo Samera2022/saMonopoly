@@ -87,7 +87,7 @@ impl EconomyService {
                 return Err(DomainError::UpgradeNotOwned(tile_id.to_string()));
             }
 
-            (property.upgrade_level, property.rent.first().copied().unwrap_or(property.base_price))
+            (property.upgrade_level, property.base_price)
         };
 
         // ─── Max level check ──────────────────────────────────────────────────
@@ -100,8 +100,12 @@ impl EconomyService {
         }
 
         // ─── Deduct upgrade cost ──────────────────────────────────────────────
-        // cost = base * (1 + current_level) / 2
-        let cost = base * (1 + current_level as i64) / 2;
+        // cost = base * (1 + current_level) / 3
+        // This softer curve ensures:
+        //   L0→L1: ~33% of base (was 50%)
+        //   L1→L2: ~67% of base (was 100%)
+        //   L2→L3: 100% of base  (was 150%)
+        let cost = base * (1 + current_level as i64) / 3;
 
         // Check affordability before mutating
         let player = state
@@ -160,8 +164,11 @@ impl EconomyService {
         match card_id {
             "get_out_of_jail" => {
                 // Auto-consumed by engine on roll; mark as used
+                // Remove only ONE copy of the card (player may hold duplicates)
                 if let Some(player) = state.players.get_mut(state.active_player_index) {
-                    player.owned_cards.retain(|c| c != card_id);
+                    if let Some(pos) = player.owned_cards.iter().position(|c| c == card_id) {
+                        player.owned_cards.swap_remove(pos);
+                    }
                     player.jail_turns = 0;
                 }
                 Ok(GameEvent::CardUsed {
@@ -172,7 +179,9 @@ impl EconomyService {
             "bonus_200" => {
                 // Auto-consumed by engine on roll; manually use here
                 if let Some(player) = state.players.get_mut(state.active_player_index) {
-                    player.owned_cards.retain(|c| c != card_id);
+                    if let Some(pos) = player.owned_cards.iter().position(|c| c == card_id) {
+                        player.owned_cards.swap_remove(pos);
+                    }
                     player.cash += 200;
                 }
                 Ok(GameEvent::CardUsed {
@@ -184,7 +193,9 @@ impl EconomyService {
                 // This card is auto-consumed during rent payment;
                 // manually mark as ready for next rent
                 if let Some(player) = state.players.get_mut(state.active_player_index) {
-                    player.owned_cards.retain(|c| c != card_id);
+                    if let Some(pos) = player.owned_cards.iter().position(|c| c == card_id) {
+                        player.owned_cards.swap_remove(pos);
+                    }
                 }
                 Ok(GameEvent::CardUsed {
                     player_id,
@@ -194,7 +205,9 @@ impl EconomyService {
             "skip_turn" => {
                 // Skip the next turn by setting jail_turns = 1 (skip without jail)
                 if let Some(player) = state.players.get_mut(state.active_player_index) {
-                    player.owned_cards.retain(|c| c != card_id);
+                    if let Some(pos) = player.owned_cards.iter().position(|c| c == card_id) {
+                        player.owned_cards.swap_remove(pos);
+                    }
                     player.jail_turns = 1;
                 }
                 Ok(GameEvent::CardUsed {
@@ -229,7 +242,8 @@ impl EconomyService {
 
         // ─── Double Rent card check ─────────────────────────────────────────────
         // If the paying player has a "double_rent" card, consume it and double the
-        // rent amount.
+        // rent amount.  The doubling applies before the rent is deducted, making it
+        // a powerful swing tool.
         let active_idx = state.active_player_index;
         let has_double_rent = state
             .players
@@ -240,7 +254,10 @@ impl EconomyService {
         let mut card_consumed = false;
         if has_double_rent {
             if let Some(player) = state.players.get_mut(active_idx) {
-                player.owned_cards.retain(|c| c != "double_rent");
+                // Remove only ONE copy
+                if let Some(pos) = player.owned_cards.iter().position(|c| c == "double_rent") {
+                    player.owned_cards.swap_remove(pos);
+                }
             }
             amount *= 2;
             card_consumed = true;

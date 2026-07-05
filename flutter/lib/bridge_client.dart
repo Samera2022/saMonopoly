@@ -1,4 +1,8 @@
 import 'dart:convert';
+import 'dart:ffi';
+
+import 'package:flutter/material.dart';
+import 'package:ffi/ffi.dart';
 
 // ============================================================================
 // Bridge models – mirroring the Rust structures in
@@ -12,10 +16,16 @@ class BridgeCommand {
 
   const BridgeCommand({required this.type, this.params});
 
-  Map<String, dynamic> toJson() => {
-        'type': type,
-        if (params != null) ...params!,
-      };
+  /// Serialize to Rust's serde-externally-tagged enum format.
+  /// - Unit variant (no params): just the string, e.g. `"Roll"`
+  /// - Struct variant (has params): `{ "VariantName": { ...params } }`
+  dynamic toJson() {
+    final p = params;
+    if (p == null || p.isEmpty) {
+      return type; // unit variant → just the string
+    }
+    return {type: p}; // struct variant → { "Type": { ... } }
+  }
 
   // ---- Convenience constructors -------------------------------------------
 
@@ -134,8 +144,23 @@ class BridgeResponse {
   const BridgeResponse({required this.event, required this.state});
 
   factory BridgeResponse.fromJson(Map<String, dynamic> json) {
+    // Handle Rust serde external tagging: event comes as
+    // {"VariantName": {dice1: ..., dice2: ...}} instead of flat fields.
+    // Flatten it so the rest of Flutter code can read fields directly.
+    var event = json['event'];
+    if (event is Map<String, dynamic>) {
+      final keys = event.keys.toList();
+      if (keys.length == 1) {
+        final inner = event[keys.first];
+        if (inner is Map<String, dynamic>) {
+          final flat = Map<String, dynamic>.from(inner);
+          flat['event_type'] = keys.first;
+          event = flat;
+        }
+      }
+    }
     return BridgeResponse(
-      event: json['event'] as Map<String, dynamic>,
+      event: event as Map<String, dynamic>,
       state: json['state'] as Map<String, dynamic>,
     );
   }
@@ -200,14 +225,93 @@ class PlayerViewModel {
 }
 
 // ============================================================================
+// Native FFI bindings to the Rust engine (libsa_monopoly_application.so)
+// ============================================================================
+
+typedef SaEngineExecuteNative = Pointer<Utf8> Function(Pointer<Utf8>);
+typedef SaEngineExecuteDart = Pointer<Utf8> Function(Pointer<Utf8>);
+typedef SaEngineFreeStringNative = Void Function(Pointer<Utf8>);
+typedef SaEngineFreeStringDart = void Function(Pointer<Utf8>);
+
+/// Loads the Rust shared library and binds the native functions.
+class RustEngineBinding {
+  late final DynamicLibrary _lib;
+  late final SaEngineExecuteDart _execute;
+  late final SaEngineFreeStringDart _freeString;
+  bool _available = false;
+
+  RustEngineBinding() {
+    try {
+      // Try common library paths
+      final libraryPaths = [
+        // Debug builds
+        'target/debug/libsa_monopoly_application.so',
+        '../target/debug/libsa_monopoly_application.so',
+        '/home/samera2022/Projects/saMonopoly/target/debug/libsa_monopoly_application.so',
+        // Release builds
+        'target/release/libsa_monopoly_application.so',
+        '../target/release/libsa_monopoly_application.so',
+        '/home/samera2022/Projects/saMonopoly/target/release/libsa_monopoly_application.so',
+      ];
+
+      DynamicLibrary? lib;
+      for (final path in libraryPaths) {
+        try {
+          lib = DynamicLibrary.open(path);
+          debugPrint('Rust engine loaded from: $path');
+          break;
+        } catch (_) {
+          // Try next path
+        }
+      }
+
+      if (lib == null) {
+        debugPrint('Rust engine library not found, will use simulation');
+        _available = false;
+        return;
+      }
+
+      _lib = lib;
+      _execute = _lib
+          .lookupFunction<SaEngineExecuteNative, SaEngineExecuteDart>(
+              'sa_engine_execute');
+      _freeString = _lib
+          .lookupFunction<SaEngineFreeStringNative, SaEngineFreeStringDart>(
+              'sa_engine_free_string');
+      _available = true;
+      debugPrint('Rust engine FFI bridge initialized successfully');
+    } catch (e) {
+      debugPrint('Failed to load Rust engine: $e');
+      _available = false;
+    }
+  }
+
+  bool get isAvailable => _available;
+
+  /// Execute a command JSON string against the Rust engine.
+  /// Returns the response JSON string.
+  String? execute(String jsonPayload) {
+    if (!_available) return null;
+
+    final inputPtr = jsonPayload.toNativeUtf8();
+    final resultPtr = _execute(inputPtr);
+    calloc.free(inputPtr);
+
+    final result = resultPtr.toDartString();
+    _freeString(resultPtr);
+    return result;
+  }
+}
+
+// ============================================================================
 // BridgeClient – main API consumed by the Flutter UI
 // ============================================================================
 
 class BridgeClient {
-  final NativeTransportPlaceholder _transport;
+  final RustEngineBinding _engine;
 
-  const BridgeClient({NativeTransportPlaceholder? transport})
-      : _transport = transport ?? const NativeTransportPlaceholder();
+  BridgeClient({RustEngineBinding? engine})
+      : _engine = engine ?? RustEngineBinding();
 
   /// Serialise a [BridgeRequest] into its JSON wire format.
   String buildRequest(BridgeRequest request) {
@@ -219,11 +323,8 @@ class BridgeClient {
     return BridgeResponse.fromJsonString(response);
   }
 
-  /// Execute a command against the (simulated) Rust engine.
-  ///
-  /// When the native FFI bridge is not connected, this method simulates an
-  /// engine round-trip by mutating the provided state snapshot locally so the
-  /// UI can still be exercised during development.
+  /// Execute a command against the Rust engine (native FFI) or fall back
+  /// to the Dart simulation if the shared library is not available.
   Future<BridgeResponse> executeCommand({
     required BridgeCommand command,
     required Map<String, dynamic> currentState,
@@ -231,17 +332,26 @@ class BridgeClient {
     final request = BridgeRequest(command: command, state: currentState);
     final jsonPayload = buildRequest(request);
 
-    // Attempt native transport first.
-    try {
-      final responseText = await _transport.execute(jsonPayload);
-      if (!responseText.contains('not connected yet')) {
-        return BridgeResponse.fromJsonString(responseText);
+    // Try native Rust engine first
+    if (_engine.isAvailable) {
+      final responseText = _engine.execute(jsonPayload);
+      if (responseText != null) {
+        try {
+          final decoded = jsonDecode(responseText);
+          if (decoded is Map<String, dynamic>) {
+            if (decoded.containsKey('error')) {
+              debugPrint('Rust engine error: ${decoded['error']}');
+            } else if (decoded.containsKey('event') && decoded.containsKey('state')) {
+              return BridgeResponse.fromJson(decoded);
+            }
+          }
+        } catch (e) {
+          debugPrint('Failed to parse Rust engine response: $e');
+        }
       }
-    } catch (_) {
-      // Fall through to simulation.
     }
 
-    // ---- Simulation mode ------------------------------------------------
+    // Fall back to Dart simulation
     return _simulateEngineResponse(request);
   }
 
@@ -274,27 +384,113 @@ class BridgeClient {
         seed ^= seed >> 7;
         seed ^= seed << 17;
         final dice2 = (seed & 0x7fffffff) % 6 + 1;
-        state['seed'] = seed;
+        // Mask to 48 bits for JSON-safe round-trip (matching Rust BridgeRng).
+        state['seed'] = seed & 0xFFFFFFFFFFFF;
+
+        // ─── Go To Jail helper ─────────────────────────────────────────────────
+        // Sets jail_turns to 3 + bail_abuse_count and moves player to jail tile.
+        void _sendToJail(Map<String, dynamic> st, int abuseCount) {
+          final idx = st['active_player_index'] as int? ?? 0;
+          final pl = List<Map<String, dynamic>>.from(
+              (st['players'] as List<dynamic>?)?.cast() ?? []);
+          if (idx < pl.length) {
+            final p = Map<String, dynamic>.from(pl[idx]);
+            final total = 3 + abuseCount;
+            p['jail_turns'] = total;
+            // Find jail tile
+            final tiles = (st['board'] as Map<String, dynamic>?)?
+                ['tiles'] as List<dynamic>? ?? [];
+            final jailTile = tiles.cast<Map<String, dynamic>>().firstWhere(
+                (t) => t['id'] == 'jail',
+                orElse: () => const <String, dynamic>{});
+            if (jailTile.isNotEmpty) {
+              p['position'] = jailTile['id'];
+            }
+            pl[idx] = p;
+            st['players'] = pl;
+          }
+        }
 
         final steps = dice1 + dice2;
+        final isSeven = dice1 + dice2 == 7;
         final activeIdx = state['active_player_index'] as int? ?? 0;
         final players = List<Map<String, dynamic>>.from(
             (state['players'] as List<dynamic>?)?.cast() ?? []);
         if (activeIdx < players.length) {
           final player = Map<String, dynamic>.from(players[activeIdx]);
+          final jailTurns = (player['jail_turns'] as num?)?.toInt() ?? 0;
+          final hospitalTurns = (player['hospital_turns'] as num?)?.toInt() ?? 0;
+
+          if (hospitalTurns > 0) {
+            // Hospital: just decrement and skip (no dice shown).
+            player['hospital_turns'] = hospitalTurns - 1;
+            players[activeIdx] = player;
+            state['players'] = players;
+            event['event_type'] = 'CommandRejected';
+            event['reason'] = 'player_in_hospital';
+            break;
+          }
+
+          if (jailTurns > 0) {
+            if (isSeven) {
+              // Rolled 7 → released! Move normally.
+              player['jail_turns'] = 0;
+              final tiles = (state['board'] as Map<String, dynamic>?)?
+                      ['tiles'] as List<dynamic>? ??
+                  [];
+              final currentPos = tiles.indexWhere(
+                  (t) => t['id'] == player['position']);
+              final newIdx = (currentPos + steps) %
+                  (tiles.length > 0 ? tiles.length : 1);
+              if (tiles.isNotEmpty) {
+                player['position'] = tiles[newIdx]['id'];
+              }
+              players[activeIdx] = player;
+              state['players'] = players;
+              event['event_type'] = 'DiceRolled';
+              event['dice1'] = dice1;
+              event['dice2'] = dice2;
+              event['is_seven'] = true;
+              event['consecutive'] = 0;
+              event['player_id'] = player['id'];
+              event['to_tile'] = player['position'];
+            } else {
+              // Failed roll — stay jailed, decrement.
+              player['jail_turns'] = jailTurns - 1;
+              players[activeIdx] = player;
+              state['players'] = players;
+              final stillJailed = player['jail_turns'] > 0;
+              if (stillJailed) {
+                event['event_type'] = 'DiceRolled';
+                event['dice1'] = dice1;
+                event['dice2'] = dice2;
+                event['is_seven'] = false;
+              } else {
+                event['event_type'] = 'PlayerReleasedFromJail';
+                event['player_id'] = player['id'];
+              }
+            }
+            break;
+          }
+
+          // Normal roll (not in jail/hospital)
           final tiles = (state['board'] as Map<String, dynamic>?)?
                   ['tiles'] as List<dynamic>? ??
               [];
           final currentPos = tiles.indexWhere(
               (t) => t['id'] == player['position']);
-          final newIdx = (currentPos + steps) % (tiles.length > 0 ? tiles.length : 1);
+          final newIdx = (currentPos + steps) %
+              (tiles.length > 0 ? tiles.length : 1);
           if (tiles.isNotEmpty) {
             player['position'] = tiles[newIdx]['id'];
           }
           players[activeIdx] = player;
           state['players'] = players;
+          event['event_type'] = 'DiceRolled';
           event['dice1'] = dice1;
           event['dice2'] = dice2;
+          event['is_seven'] = isSeven;
+          event['consecutive'] = 0;
           event['player_id'] = player['id'];
           event['to_tile'] = player['position'];
         }
@@ -324,7 +520,8 @@ class BridgeClient {
           final activeIdx = state['active_player_index'] as int? ?? 0;
           if (activeIdx < players.length) {
             final player = Map<String, dynamic>.from(players[activeIdx]);
-            player['cash'] = ((player['cash'] as num?)?.toInt() ?? 0) - price;
+            player['cash'] =
+                ((player['cash'] as num?)?.toInt() ?? 0) - price;
             players[activeIdx] = player;
             state['players'] = players;
           }
@@ -341,7 +538,8 @@ class BridgeClient {
         break;
 
       case 'PayRent':
-        event['tile_id'] = request.command.params?['tile_id'] as String? ?? '';
+        event['tile_id'] =
+            request.command.params?['tile_id'] as String? ?? '';
         event['amount'] = 50;
         break;
 
@@ -356,42 +554,46 @@ class BridgeClient {
                 ?.cast() ?? []);
         for (final prop in upProperties) {
           if (prop['tile_id'] == tileId) {
-            final currentLevel = (prop['upgrade_level'] as num?)?.toInt() ?? 0;
+            final currentLevel =
+                (prop['upgrade_level'] as num?)?.toInt() ?? 0;
             final basePrice = (prop['base_price'] as num).toInt();
-            final base = (prop['rent'] as List<dynamic>?)?.isNotEmpty == true
-                ? ((prop['rent'] as List<dynamic>).first as num).toInt()
-                : basePrice;
-            final cost = base * (1 + currentLevel) ~/ 2;
+            // Upgrade cost = base_price * (1 + level) / 3
+            final cost = basePrice * (1 + currentLevel) ~/ 3;
             // Deduct cost from active player
             final upPlayers = List<Map<String, dynamic>>.from(
                 (state['players'] as List<dynamic>?)?.cast() ?? []);
             final activeIdx = state['active_player_index'] as int? ?? 0;
             if (activeIdx < upPlayers.length) {
               final player = Map<String, dynamic>.from(upPlayers[activeIdx]);
-              player['cash'] = ((player['cash'] as num?)?.toInt() ?? 0) - cost;
+              player['cash'] =
+                  ((player['cash'] as num?)?.toInt() ?? 0) - cost;
               upPlayers[activeIdx] = player;
               state['players'] = upPlayers;
             }
             // Increment level
             prop['upgrade_level'] = currentLevel + 1;
-            event['name'] = 'upgrade_property:$tileId:${currentLevel + 1}';
+            event['name'] =
+                'upgrade_property:$tileId:${currentLevel + 1}';
             break;
           }
         }
         break;
 
       case 'Mortgage':
-        event['tile_id'] = request.command.params?['tile_id'] as String? ?? '';
+        event['tile_id'] =
+            request.command.params?['tile_id'] as String? ?? '';
         event['amount'] = 100;
         break;
 
       case 'Redeem':
-        event['tile_id'] = request.command.params?['tile_id'] as String? ?? '';
+        event['tile_id'] =
+            request.command.params?['tile_id'] as String? ?? '';
         event['amount'] = 110;
         break;
 
       case 'Auction':
-        event['tile_id'] = request.command.params?['tile_id'] as String? ?? '';
+        event['tile_id'] =
+            request.command.params?['tile_id'] as String? ?? '';
         event['starting_bid'] =
             request.command.params?['starting_bid'] as int? ?? 0;
         break;
@@ -409,10 +611,51 @@ class BridgeClient {
             request.command.params?['to_player_id'] as String? ?? '';
         break;
 
+      case 'PayBail': {
+        final idx = state['active_player_index'] as int? ?? 0;
+        int paidAmount = 0;
+        final pl = List<Map<String, dynamic>>.from(
+            (state['players'] as List<dynamic>?)?.cast() ?? []);
+        if (idx < pl.length) {
+          final p = Map<String, dynamic>.from(pl[idx]);
+          final jailTurns = (p['jail_turns'] as num?)?.toInt() ?? 0;
+          paidAmount = jailTurns * 50;
+          p['cash'] = ((p['cash'] as num?)?.toInt() ?? 0) - paidAmount;
+          p['jail_turns'] = 0;
+          pl[idx] = p;
+          state['players'] = pl;
+        }
+        final abuseCount = (state['bail_abuse_count'] as num?)?.toInt() ?? 0;
+        state['bail_abuse_count'] = abuseCount + 1;
+        event['event_type'] = 'BailPaid';
+        event['player_id'] = _activePlayerId(state);
+        event['amount'] = paidAmount;
+        break;
+      }
+
       case 'BuyCard':
-        event['card_id'] =
+        final cardId =
             request.command.params?['card_id'] as String? ?? '';
-        event['price'] = request.command.params?['price'] as int? ?? 0;
+        final price = request.command.params?['price'] as int? ?? 0;
+        event['card_id'] = cardId;
+        event['price'] = price;
+        // Deduct cash and add card to active player's inventory
+        final bcPlayers = List<Map<String, dynamic>>.from(
+            (state['players'] as List<dynamic>?)?.cast() ?? []);
+        final bcIdx = state['active_player_index'] as int? ?? 0;
+        if (bcIdx < bcPlayers.length) {
+          final player = Map<String, dynamic>.from(bcPlayers[bcIdx]);
+          player['cash'] =
+              ((player['cash'] as num?)?.toInt() ?? 0) - price;
+          final ownedCards = List<String>.from(
+              (player['owned_cards'] as List<dynamic>?)
+                      ?.cast<String>() ??
+                  []);
+          ownedCards.add(cardId);
+          player['owned_cards'] = ownedCards;
+          bcPlayers[bcIdx] = player;
+          state['players'] = bcPlayers;
+        }
         break;
 
       case 'SellShares':
@@ -440,10 +683,26 @@ class BridgeClient {
         break;
 
       case 'UseCard':
+        final useCardId =
+            request.command.params?['card_id'] as String? ?? '';
         event['event_type'] = 'CardUsed';
         event['player_id'] = _activePlayerId(state);
-        event['card_id'] =
-            request.command.params?['card_id'] as String? ?? '';
+        event['card_id'] = useCardId;
+        // Remove the card from active player's inventory
+        final ucPlayers = List<Map<String, dynamic>>.from(
+            (state['players'] as List<dynamic>?)?.cast() ?? []);
+        final ucIdx = state['active_player_index'] as int? ?? 0;
+        if (ucIdx < ucPlayers.length) {
+          final player = Map<String, dynamic>.from(ucPlayers[ucIdx]);
+          final ownedCards = List<String>.from(
+              (player['owned_cards'] as List<dynamic>?)
+                      ?.cast<String>() ??
+                  []);
+          ownedCards.remove(useCardId);
+          player['owned_cards'] = ownedCards;
+          ucPlayers[ucIdx] = player;
+          state['players'] = ucPlayers;
+        }
         break;
 
       case 'ConfigGet':
@@ -487,19 +746,5 @@ class BridgeClient {
     return Map<String, dynamic>.from(
       jsonDecode(jsonEncode(original)) as Map<String, dynamic>,
     );
-  }
-}
-
-// ============================================================================
-// Native transport placeholder
-// ============================================================================
-
-class NativeTransportPlaceholder {
-  const NativeTransportPlaceholder();
-
-  /// In production this would call into the Rust FFI layer.
-  /// Currently returns a sentinel that triggers the simulated path.
-  Future<String> execute(String payload) async {
-    return '{"error":"native bridge not connected yet"}';
   }
 }

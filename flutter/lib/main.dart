@@ -117,7 +117,7 @@ class GameScreen extends StatefulWidget {
 }
 
 class _GameScreenState extends State<GameScreen> {
-  final BridgeClient _bridgeClient = const BridgeClient();
+  final BridgeClient _bridgeClient = BridgeClient();
   final ContentPackLoader _loader = const ContentPackLoader();
   final ScrollController _logScrollController = ScrollController();
 
@@ -148,6 +148,10 @@ class _GameScreenState extends State<GameScreen> {
   /// `null` if they haven't rolled yet this turn or the turn has ended.
   /// Used to prevent Buy/Upgrade without having just arrived at the tile.
   String? _landedTileIdThisTurn;
+
+  /// When non-null, the property detail overlay is shown for this tile.
+  /// Using state-based overlay instead of showDialog for instant response.
+  String? _detailTileId;
 
   // Player colours
   static const List<Color> _playerColors = [
@@ -223,47 +227,56 @@ class _GameScreenState extends State<GameScreen> {
   ];
 
   // Default tile set for the built-in board
+  /// The 40-tile classic Monopoly board with reserved expansion slots.
+  ///
+  /// Tiles with kind "Reserved" are pass-through tiles (no effect) that can
+  /// be dynamically replaced with `Lottery` or `StockMarket` tiles when those
+  /// sub-systems are enabled via game config.
   final List<Map<String, String>> _defaultTiles = const [
-    {'id': 'start', 'name': 'Start', 'kind': 'Start'},
-    {'id': 'prop_1', 'name': 'Mediterranean Ave', 'kind': 'OrdinaryProperty'},
-    {'id': 'chance_1', 'name': 'Chance', 'kind': 'Chance'},
-    {'id': 'prop_2', 'name': 'Baltic Ave', 'kind': 'OrdinaryProperty'},
-    {'id': 'tax_1', 'name': 'Income Tax', 'kind': 'Bank'},
-    {'id': 'rr_1', 'name': 'Reading RR', 'kind': 'OrdinaryProperty'},
-    {'id': 'prop_3', 'name': 'Oriental Ave', 'kind': 'OrdinaryProperty'},
-    {'id': 'chance_2', 'name': 'Community Chest', 'kind': 'Chance'},
-    {'id': 'prop_4', 'name': 'Vermont Ave', 'kind': 'OrdinaryProperty'},
-    {'id': 'prop_5', 'name': 'Connecticut Ave', 'kind': 'OrdinaryProperty'},
-    {'id': 'jail', 'name': 'Jail', 'kind': 'Jail'},
-    {'id': 'prop_6', 'name': 'St. Charles Pl', 'kind': 'OrdinaryProperty'},
-    {'id': 'util_1', 'name': 'Electric Co', 'kind': 'ExtensionProperty'},
-    {'id': 'prop_7', 'name': 'States Ave', 'kind': 'OrdinaryProperty'},
-    {'id': 'prop_8', 'name': 'Virginia Ave', 'kind': 'OrdinaryProperty'},
-    {'id': 'rr_2', 'name': 'Penn RR', 'kind': 'OrdinaryProperty'},
-    {'id': 'prop_9', 'name': 'St. James Pl', 'kind': 'OrdinaryProperty'},
-    {'id': 'chance_3', 'name': 'Chance', 'kind': 'Chance'},
-    {'id': 'prop_10', 'name': 'Tennessee Ave', 'kind': 'OrdinaryProperty'},
-    {'id': 'prop_11', 'name': 'New York Ave', 'kind': 'OrdinaryProperty'},
-    {'id': 'park', 'name': 'Free Parking', 'kind': 'Bank'},
-    {'id': 'prop_12', 'name': 'Kentucky Ave', 'kind': 'OrdinaryProperty'},
-    {'id': 'chance_4', 'name': 'Chance', 'kind': 'Chance'},
-    {'id': 'prop_13', 'name': 'Indiana Ave', 'kind': 'OrdinaryProperty'},
-    {'id': 'prop_14', 'name': 'Illinois Ave', 'kind': 'OrdinaryProperty'},
-    {'id': 'rr_3', 'name': 'B&O RR', 'kind': 'OrdinaryProperty'},
-    {'id': 'prop_15', 'name': 'Atlantic Ave', 'kind': 'OrdinaryProperty'},
-    {'id': 'prop_16', 'name': 'Ventnor Ave', 'kind': 'OrdinaryProperty'},
-    {'id': 'util_2', 'name': 'Water Works', 'kind': 'ExtensionProperty'},
-    {'id': 'prop_17', 'name': 'Marvin Gardens', 'kind': 'OrdinaryProperty'},
-    {'id': 'go_to_jail', 'name': 'Go To Jail', 'kind': 'Jail'},
-    {'id': 'prop_18', 'name': 'Pacific Ave', 'kind': 'OrdinaryProperty'},
-    {'id': 'prop_19', 'name': 'N. Carolina Ave', 'kind': 'OrdinaryProperty'},
-    {'id': 'chance_5', 'name': 'Community Chest', 'kind': 'Chance'},
-    {'id': 'prop_20', 'name': 'Pennsylvania Ave', 'kind': 'OrdinaryProperty'},
-    {'id': 'rr_4', 'name': 'Short Line', 'kind': 'OrdinaryProperty'},
-    {'id': 'chance_6', 'name': 'Chance', 'kind': 'Chance'},
-    {'id': 'prop_21', 'name': 'Park Place', 'kind': 'OrdinaryProperty'},
-    {'id': 'tax_2', 'name': 'Luxury Tax', 'kind': 'Bank'},
-    {'id': 'prop_22', 'name': 'Boardwalk', 'kind': 'OrdinaryProperty'},
+    // ── Bottom row (Start → Jail) ─────────────────────────────────────
+    {'id': 'start',     'name': 'Start',             'kind': 'Start'},
+    {'id': 'prop_1',    'name': 'Mediterranean Ave',  'kind': 'OrdinaryProperty'},
+    {'id': 'chance_1',  'name': 'Chance',             'kind': 'Chance'},
+    {'id': 'prop_2',    'name': 'Baltic Ave',         'kind': 'OrdinaryProperty'},
+    {'id': 'tax_1',     'name': 'Income Tax',         'kind': 'Bank'},
+    {'id': 'rr_1',      'name': 'Reading RR',         'kind': 'OrdinaryProperty'},
+    {'id': 'prop_3',    'name': 'Oriental Ave',       'kind': 'OrdinaryProperty'},
+    {'id': 'lottery_1', 'name': 'Lottery',            'kind': 'Lottery'},
+    {'id': 'prop_4',    'name': 'Vermont Ave',        'kind': 'OrdinaryProperty'},
+    {'id': 'prop_5',    'name': 'Connecticut Ave',    'kind': 'OrdinaryProperty'},
+    // ── Right column (Jail → Free Parking) ────────────────────────────
+    {'id': 'jail',      'name': 'Jail',               'kind': 'Jail'},
+    {'id': 'prop_6',    'name': 'St. Charles Pl',     'kind': 'OrdinaryProperty'},
+    {'id': 'util_1',    'name': 'Electric Co',        'kind': 'ExtensionProperty'},
+    {'id': 'prop_7',    'name': 'States Ave',         'kind': 'OrdinaryProperty'},
+    {'id': 'prop_8',    'name': 'Virginia Ave',       'kind': 'OrdinaryProperty'},
+    {'id': 'rr_2',      'name': 'Penn RR',            'kind': 'OrdinaryProperty'},
+    {'id': 'prop_9',    'name': 'St. James Pl',       'kind': 'OrdinaryProperty'},
+    {'id': 'chance_3',  'name': 'Chance',             'kind': 'Chance'},
+    {'id': 'prop_10',   'name': 'Tennessee Ave',      'kind': 'OrdinaryProperty'},
+    {'id': 'prop_11',   'name': 'New York Ave',       'kind': 'OrdinaryProperty'},
+    // ── Top row (Free Parking → Go To Jail) ──────────────────────────
+    {'id': 'park',      'name': 'Free Parking',       'kind': 'Bank'},
+    {'id': 'prop_12',   'name': 'Kentucky Ave',       'kind': 'OrdinaryProperty'},
+    {'id': 'chance_4',  'name': 'Chance',             'kind': 'Chance'},
+    {'id': 'prop_13',   'name': 'Indiana Ave',        'kind': 'OrdinaryProperty'},
+    {'id': 'prop_14',   'name': 'Illinois Ave',       'kind': 'OrdinaryProperty'},
+    {'id': 'rr_3',      'name': 'B&O RR',             'kind': 'OrdinaryProperty'},
+    {'id': 'prop_15',   'name': 'Atlantic Ave',       'kind': 'OrdinaryProperty'},
+    {'id': 'card_shop_1','name': 'Card Shop',         'kind': 'CardShop'},
+    {'id': 'util_2',    'name': 'Water Works',        'kind': 'ExtensionProperty'},
+    {'id': 'prop_17',   'name': 'Marvin Gardens',     'kind': 'OrdinaryProperty'},
+    // ── Left column (Go To Jail → Start) ─────────────────────────────
+    {'id': 'go_to_jail','name': 'Go To Jail',         'kind': 'Jail'},
+    {'id': 'prop_18',   'name': 'Pacific Ave',        'kind': 'OrdinaryProperty'},
+    {'id': 'prop_19',   'name': 'N. Carolina Ave',    'kind': 'OrdinaryProperty'},
+    {'id': 'chance_5',  'name': 'Chance',             'kind': 'Chance'},
+    {'id': 'prop_20',   'name': 'Pennsylvania Ave',   'kind': 'OrdinaryProperty'},
+    {'id': 'rr_4',      'name': 'Short Line',         'kind': 'OrdinaryProperty'},
+    {'id': 'reserve_1', 'name': 'Expansion Slot',     'kind': 'Bank'},   // → StockMarket
+    {'id': 'prop_21',   'name': 'Park Place',         'kind': 'OrdinaryProperty'},
+    {'id': 'tax_2',     'name': 'Luxury Tax',         'kind': 'Bank'},
+    {'id': 'prop_22',   'name': 'Boardwalk',          'kind': 'OrdinaryProperty'},
   ];
 
   @override
@@ -315,28 +328,73 @@ class _GameScreenState extends State<GameScreen> {
       },
     );
 
-    // Build properties from tiles that are OrdinaryProperty
+    // Classic Monopoly property prices (tile_id → base_price)
+    const prices = <String, int>{
+      'prop_1': 60,   'prop_2': 60,
+      'rr_1': 200,    'rr_2': 200,    'rr_3': 200,    'rr_4': 200,
+      'prop_3': 100,  'prop_4': 100,  'prop_5': 120,
+      'prop_6': 140,  'prop_7': 140,  'prop_8': 160,
+      'prop_9': 180,  'prop_10': 180, 'prop_11': 200,
+      'prop_12': 220, 'prop_13': 220, 'prop_14': 240,
+      'prop_15': 260, 'prop_16': 260, 'prop_17': 280,
+      'prop_18': 300, 'prop_19': 300, 'prop_20': 320,
+      'prop_21': 350, 'prop_22': 400,
+      'util_1': 150,  'util_2': 150,
+    };
+    // Color groups for group rent (tile_id → [linked_targets...])
+    const groups = <String, List<String>>{
+      'prop_1':  ['prop_2'],
+      'prop_2':  ['prop_1'],
+      'prop_3':  ['prop_4', 'prop_5'],
+      'prop_4':  ['prop_3', 'prop_5'],
+      'prop_5':  ['prop_3', 'prop_4'],
+      'prop_6':  ['prop_7', 'prop_8'],
+      'prop_7':  ['prop_6', 'prop_8'],
+      'prop_8':  ['prop_6', 'prop_7'],
+      'rr_1':    ['rr_2', 'rr_3', 'rr_4'],
+      'rr_2':    ['rr_1', 'rr_3', 'rr_4'],
+      'rr_3':    ['rr_1', 'rr_2', 'rr_4'],
+      'rr_4':    ['rr_1', 'rr_2', 'rr_3'],
+      'prop_9':  ['prop_10', 'prop_11'],
+      'prop_10': ['prop_9', 'prop_11'],
+      'prop_11': ['prop_9', 'prop_10'],
+      'prop_12': ['prop_13', 'prop_14'],
+      'prop_13': ['prop_12', 'prop_14'],
+      'prop_14': ['prop_12', 'prop_13'],
+      // prop_16 replaced by card_shop_1 — Yellow group now has 2 members
+      'prop_15': ['prop_17'],
+      'prop_17': ['prop_15'],
+      'prop_18': ['prop_19', 'prop_20'],
+      'prop_19': ['prop_18', 'prop_20'],
+      'prop_20': ['prop_18', 'prop_19'],
+      'prop_21': ['prop_22'],
+      'prop_22': ['prop_21'],
+    };
+
+    // Build properties from tiles using classic pricing
     final properties = <Map<String, dynamic>>[];
     for (final tile in tileSource) {
-      if (tile['kind'] == 'OrdinaryProperty') {
+      final tid = tile['id'];
+      final price = prices[tid] ?? 0;
+      if (tile['kind'] == 'OrdinaryProperty' && price > 0) {
         properties.add({
-          'tile_id': tile['id'],
-          'name_key': 'prop.${tile['id']}',
+          'tile_id': tid,
+          'name_key': 'prop.$tid',
           'kind': 'Ordinary',
-          'base_price': 100 + math.Random().nextInt(300),
-          'rent': [10, 20, 30, 40],
+          'base_price': price,
+          'rent': <int>[],
           'upgrade_level': 0,
           'owner': null,
           'is_mortgaged': false,
-          'linked_targets': <String>[],
+          'linked_targets': groups[tid] ?? <String>[],
         });
-      } else if (tile['kind'] == 'ExtensionProperty') {
+      } else if (tile['kind'] == 'ExtensionProperty' && price > 0) {
         properties.add({
-          'tile_id': tile['id'],
-          'name_key': 'prop.${tile['id']}',
+          'tile_id': tid,
+          'name_key': 'prop.$tid',
           'kind': 'Extension',
-          'base_price': 150,
-          'rent': [15, 30, 45],
+          'base_price': price,
+          'rent': <int>[],
           'upgrade_level': 0,
           'owner': null,
           'is_mortgaged': false,
@@ -369,7 +427,11 @@ class _GameScreenState extends State<GameScreen> {
       'stock_market': null,
       'active_auction': null,
       'consecutive_doubles': 0,
-      'group_rent_enabled': _useComplexBoard, // enable group rent for test
+      'max_upgrade_level': 3,
+      'extension_upgrade_enabled': true,
+      'group_rent_enabled': true,
+      'lottery_state': null,
+      'bail_abuse_count': 0,
     };
   }
 
@@ -489,9 +551,27 @@ class _GameScreenState extends State<GameScreen> {
 
   /// Build a [GameStateData] from a raw state JSON map.
   /// Optionally override player tile positions (used during animation).
+  /// Restore display names on tiles that lost them during Rust engine round-trip
+  /// (Rust's `Tile` only has `name_key`, not `name`).
+  void _injectTileNames(Map<String, dynamic> rawState) {
+    final tiles = (rawState['board'] as Map<String, dynamic>?)?
+        ['tiles'] as List<dynamic>?;
+    if (tiles == null) return;
+    final names = _tileNames;
+    for (final t in tiles) {
+      if (t is Map<String, dynamic>) {
+        final id = t['id'] as String?;
+        if (id != null && t['name'] == null) {
+          t['name'] = names[id] ?? id;
+        }
+      }
+    }
+  }
+
   GameStateData _buildGameState(Map<String, dynamic> rawState,
       {String lastEvent = '', Map<String, int> diceResult = const {},
       Map<int, String>? positionOverrides}) {
+    _injectTileNames(rawState);
     final playersList = BridgeClient.parsePlayers(rawState);
     final tokens = playersList
         .map((p) {
@@ -549,9 +629,37 @@ class _GameScreenState extends State<GameScreen> {
       command: BridgeCommand.roll(),
       currentState: _currentState,
     );
+
+    final eventType = response.event['event_type'] as String? ?? '';
+
+    // Hospital: skip without dice
+    if (eventType == 'CommandRejected') {
+      final reason = response.event['reason'] as String? ?? '';
+      if (reason == 'player_in_hospital') {
+        setState(() {
+          _currentState = response.state;
+          _gameState = _buildGameState(
+            response.state,
+            lastEvent: 'In hospital (skip turn)',
+          );
+        });
+        _addLog('In hospital — turn skipped');
+        return;
+      }
+    }
+
+    // Read dice values from the response event (engine always generates
+    // them now — even when in jail).
     final dice1 = (response.event['dice1'] as num?)?.toInt() ?? 0;
     final dice2 = (response.event['dice2'] as num?)?.toInt() ?? 0;
     final steps = dice1 + dice2;
+    final is_seven = dice1 + dice2 == 7;
+
+    // Detect jail-specific events:
+    final isJailStillLocked =
+        eventType == 'DiceRolled' && response.event['consecutive'] == null;
+    final isJailReleased = eventType == 'PlayerReleasedFromJail';
+    final isJailRoll = isJailStillLocked || isJailReleased;
 
     // ---- Dice rolling animation ------------------------------------------
     _isRollingDice = true;
@@ -570,7 +678,8 @@ class _GameScreenState extends State<GameScreen> {
       _isRollingDice = false;
     });
 
-    // Compute the animation path (intermediate tile IDs)
+    // Compute the animation path (intermediate tile IDs).
+    // When stuck in jail (failed roll), no movement occurs.
     final rawTiles = (_currentState['board'] as Map<String, dynamic>?)?
         ['tiles'] as List<dynamic>? ?? [];
     final activeIdx = _gameState.activePlayerIndex;
@@ -578,7 +687,7 @@ class _GameScreenState extends State<GameScreen> {
     final currentTileIdx = rawTiles.indexWhere((t) => t['id'] == currentPos);
 
     final path = <String>[];
-    if (rawTiles.isNotEmpty) {
+    if (!isJailRoll && rawTiles.isNotEmpty) {
       for (var i = 1; i <= steps; i++) {
         final idx = (currentTileIdx + i) % rawTiles.length;
         path.add(rawTiles[idx]['id'] as String);
@@ -606,15 +715,23 @@ class _GameScreenState extends State<GameScreen> {
     }
 
     // Apply final state from the engine
+    final jailMsg = isJailStillLocked
+        ? ' (jail — need 7)'
+        : isJailReleased
+            ? ' (released from jail!)'
+            : '';
     setState(() {
       _currentState = response.state;
       _gameState = _buildGameState(
         response.state,
-        lastEvent: 'Rolled $dice1 + $dice2',
+        lastEvent: 'Rolled $dice1 + $dice2${isJailRoll ? '\n$jailMsg' : ''}',
         diceResult: {'dice1': dice1, 'dice2': dice2},
       );
     });
-    _addLog('Rolled $dice1 + $dice2 = ${dice1 + dice2}');
+    _addLog('Rolled $dice1 + $dice2 = ${dice1 + dice2}$jailMsg');
+
+    // Skip tile effect resolution when stuck in jail (player didn't move).
+    if (isJailRoll) return;
 
     // Resolve special tile effects
     final playerPos =
@@ -625,13 +742,12 @@ class _GameScreenState extends State<GameScreen> {
     // on the turn they first arrive).
     _landedTileIdThisTurn = playerPos;
 
-    // Decrement rolls remaining; if single die shows 6, grant re-roll
+    // Decrement rolls remaining; if sum of two dice equals 7, grant re-roll
     _rollsRemainingThisTurn--;
-    // Single die mode: die face = dice1 (simulated as dice1%6+1)
-    final dieFace = dice1; // already the displayed face value
-    if (dieFace == 6) {
+    final diceSum = dice1 + dice2;
+    if (diceSum == 7) {
       _rollsRemainingThisTurn++;
-      _addLog('Rolled a 6! Extra roll granted.');
+      _addLog('Rolled 7! Extra roll granted.');
     }
     setState(() {}); // refresh button state
 
@@ -723,9 +839,19 @@ class _GameScreenState extends State<GameScreen> {
     );
     setState(() {
       _currentState = response.state;
-      _gameState = _buildGameState(response.state, lastEvent: 'Bought $cardId');
+      final eventType = response.event['event_type'] as String? ?? '';
+      final accepted = eventType == 'CardBought';
+      _gameState = _buildGameState(
+        response.state,
+        lastEvent: accepted ? 'Bought ${cardId}' : 'Purchase rejected',
+      );
+      if (accepted) {
+        _addLog('Bought card: $cardId');
+      } else {
+        final reason = response.event['reason'] as String? ?? 'unknown';
+        _addLog('Card purchase rejected: $reason');
+      }
     });
-    _addLog('Bought card: $cardId');
   }
 
   Future<void> _onUseCard(String cardId) async {
@@ -948,30 +1074,44 @@ class _GameScreenState extends State<GameScreen> {
     _addLog('Player upgraded $tileId');
   }
 
-  /// Show a detailed property information dialog.
+  /// Show a detailed property information dialog using state-based overlay.
   void _showPropertyDetailDialog(String tileId) {
+    setState(() {
+      _detailTileId = tileId;
+    });
+  }
+
+  /// Build the property detail overlay widget (used in the build method).
+  Widget _buildPropertyOverlay() {
+    final tileId = _detailTileId;
+
     final rawTiles = (_currentState['board'] as Map<String, dynamic>?)?
             ['tiles'] as List<dynamic>? ??
         [];
-    final tileData = rawTiles.cast<Map<String, dynamic>>().firstWhere(
-      (t) => t['id'] == tileId,
-      orElse: () => <String, dynamic>{},
-    );
-    if (tileData.isEmpty) return;
-
-    final tileName = (tileData['name'] as String?) ?? tileId;
-    final tileKind = (tileData['kind'] as String?) ?? 'Unknown';
+    final tileIdx = tileId != null
+        ? rawTiles.indexWhere((t) => t['id'] == tileId)
+        : 0;
+    final tileData = tileIdx >= 0
+        ? rawTiles[tileIdx] as Map<String, dynamic>
+        : <String, dynamic>{};
+    // After a Rust engine round-trip, the `name` field is stripped (Rust's Tile
+    // only has `name_key`). Fall back to _tileNames for a human-readable label.
+    final tileName = (tileData['name'] as String?) ??
+        _tileNames[tileId ?? ''] ??
+        tileId ??
+        '';
+    final tileKind = (tileData['kind'] as String?) ?? '';
 
     final properties = (_currentState['board'] as Map<String, dynamic>?)?
             ['properties'] as List<dynamic>? ??
         [];
-    final propData = properties.cast<Map<String, dynamic>>().firstWhere(
-      (p) => p['tile_id'] == tileId,
-      orElse: () => <String, dynamic>{},
-    );
+    final propIdx = properties.indexWhere(
+        (p) => (p as Map<String, dynamic>)['tile_id'] == tileId);
+    final propData = propIdx >= 0
+        ? properties[propIdx] as Map<String, dynamic>
+        : <String, dynamic>{};
     final isProperty = propData.isNotEmpty;
 
-    // Owner
     final ownerId = isProperty ? propData['owner'] as String? : null;
     String ownerLabel;
     Color ownerColor;
@@ -995,16 +1135,10 @@ class _GameScreenState extends State<GameScreen> {
         isProperty ? ((propData['upgrade_level'] as num?)?.toInt() ?? 0) : 0;
     final basePrice =
         isProperty ? ((propData['base_price'] as num?)?.toInt() ?? 0) : 0;
-    final rentList = isProperty
-        ? (propData['rent'] as List<dynamic>?)
-                ?.map((e) => (e as num).toInt())
-                .toList() ??
-            <int>[]
-        : <int>[];
-    final baseRent = rentList.isNotEmpty ? rentList[0] : (basePrice ~/ 10);
-    final currentRent = baseRent * (1 + level) ~/ 10;
-
-    // Group rent
+    // Rent is always derived from base_price (formula: base_price * (1+level) / 10).
+    // The separate `rent[]` array in map data is ignored for calculation; it exists
+    // only for backward compatibility.
+    final currentRent = basePrice * (1 + level) ~/ 10;
     int groupRent = 0;
     int groupCount = 1;
     final linkedTargets = isProperty
@@ -1017,112 +1151,106 @@ class _GameScreenState extends State<GameScreen> {
         linkedTargets.isNotEmpty && ownerId != null) {
       groupCount = 1;
       for (final target in linkedTargets) {
-        final tp = properties.cast<Map<String, dynamic>>().firstWhere(
-          (p) => p['tile_id'] == target,
-          orElse: () => <String, dynamic>{},
-        );
-        if (tp.isNotEmpty && tp['owner'] == ownerId) {
+        final tIdx = properties.indexWhere(
+            (p) => (p as Map<String, dynamic>)['tile_id'] == target);
+        if (tIdx < 0) continue;
+        final tp = properties[tIdx] as Map<String, dynamic>;
+        if (tp['owner'] == ownerId) {
           final tl = (tp['upgrade_level'] as num?)?.toInt() ?? 0;
-          final tr = (tp['rent'] as List<dynamic>?)
-                  ?.map((e) => (e as num).toInt())
-                  .toList() ??
-              <int>[];
           final tb = (tp['base_price'] as num?)?.toInt() ?? 0;
-          final tbr = tr.isNotEmpty ? tr[0] : (tb ~/ 10);
-          groupRent += tbr * (1 + tl) ~/ 10;
+          groupRent += tb * (1 + tl) ~/ 10;
           groupCount++;
         }
       }
-      groupRent += currentRent; // include this property's own rent
+      groupRent += currentRent;
     }
-
-    final upgradeCost = baseRent * (1 + level) ~/ 2;
+    // Upgrade cost formula: base_price * (1 + level) / 3
+    final upgradeCost = basePrice * (1 + level) ~/ 3;
     final maxLevel =
         (_currentState['max_upgrade_level'] as num?)?.toInt() ?? 3;
     final canUpgrade = ownerId != null && level < maxLevel;
 
-    // ── Tile color chip ──────────────────────────────────────
     Color tileColor;
     try {
-      tileColor = BoardTileViewModel(id: tileId, name: tileName, kind: tileKind).color;
+      tileColor = BoardTileViewModel(id: tileId ?? '', name: tileName, kind: tileKind).color;
     } catch (_) {
       tileColor = Colors.grey;
     }
 
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Row(children: [
-          Container(
-            width: 14, height: 14,
-            decoration: BoxDecoration(
-              color: tileColor,
-              shape: BoxShape.rectangle,
-              borderRadius: BorderRadius.circular(3),
-            ),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(tileName,
-                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-                overflow: TextOverflow.ellipsis),
-          ),
-        ]),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _detailRow('Type', tileKind),
-            const Divider(height: 10),
-            if (isProperty) ...[
-              _detailRow('Owner', ownerLabel,
-                  valueColor: ownerId != null ? ownerColor : null),
-              _detailRow('Level', level > 0 ? '$level ★' : '0 (base)'),
-              const Divider(height: 10),
-              _detailRow('Base Price', '\$$basePrice'),
-              _detailRow('Rent (current)', '\$$currentRent',
-                  valueColor: Colors.red.shade700),
-              if (groupRent > 0)
-                _detailRow('Group Rent (×$groupCount)',
-                    '\$$groupRent',
-                    valueColor: Colors.deepOrange),
-              const Divider(height: 10),
-              _detailRow('Upgrade Cost',
-                  canUpgrade ? '\$$upgradeCost' : 'Max level',
-                  valueColor:
-                      canUpgrade ? Colors.green.shade700 : Colors.grey),
-              if (linkedTargets.isNotEmpty) ...[
-                const SizedBox(height: 6),
-                const Text('Linked group:',
-                    style: TextStyle(
-                        fontSize: 12, fontWeight: FontWeight.w600)),
-                const SizedBox(height: 2),
-                ...linkedTargets.map((t) {
-                  final td = rawTiles.cast<Map<String, dynamic>>().firstWhere(
-                    (x) => x['id'] == t,
-                    orElse: () => <String, dynamic>{},
-                  );
-                  return Padding(
-                    padding: const EdgeInsets.only(left: 12, bottom: 1),
-                    child: Text('• ${td['name'] ?? t}',
-                        style: const TextStyle(fontSize: 12)),
-                  );
-                }),
+    return Material(
+      color: Colors.black54,
+      child: Center(
+        child: GestureDetector(
+          onTap: () => setState(() => _detailTileId = null),
+          child: AlertDialog(
+            title: Row(children: [
+              Container(
+                width: 14, height: 14,
+                decoration: BoxDecoration(
+                  color: tileColor,
+                  shape: BoxShape.rectangle,
+                  borderRadius: BorderRadius.circular(3),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(tileName,
+                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                    overflow: TextOverflow.ellipsis),
+              ),
+            ]),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _detailRow('Type', tileKind),
+                const Divider(height: 10),
+                if (isProperty) ...[
+                  _detailRow('Owner', ownerLabel,
+                      valueColor: ownerId != null ? ownerColor : null),
+                  _detailRow('Level', level > 0 ? '$level ★' : '0 (base)'),
+                  const Divider(height: 10),
+                  _detailRow('Base Price', '\$$basePrice'),
+                  _detailRow('Rent (current)', '\$$currentRent',
+                      valueColor: Colors.red.shade700),
+                  if (groupRent > 0)
+                    _detailRow('Group Rent (×$groupCount)',
+                        '\$$groupRent', valueColor: Colors.deepOrange),
+                  const Divider(height: 10),
+                  _detailRow('Upgrade Cost',
+                      canUpgrade ? '\$$upgradeCost' : 'Max level',
+                      valueColor: canUpgrade ? Colors.green.shade700 : Colors.grey),
+                  if (linkedTargets.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    const Text('Linked group:',
+                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+                    const SizedBox(height: 2),
+                    ...linkedTargets.map((t) {
+                      final tIdx = rawTiles.indexWhere((x) => x['id'] == t);
+                      final td = tIdx >= 0 ? rawTiles[tIdx] as Map<String, dynamic> : null;
+                      return Padding(
+                        padding: const EdgeInsets.only(left: 12, bottom: 1),
+                        child: Text('• ${td?['name'] ?? t}',
+                            style: const TextStyle(fontSize: 12)),
+                      );
+                    }),
+                  ],
+                ] else ...[
+                  _detailRow('Owner', 'N/A'),
+                  const SizedBox(height: 4),
+                  const Text('This tile is not a purchasable property.',
+                      style: TextStyle(fontSize: 12, color: Colors.grey)),
+                ],
               ],
-            ] else ...[
-              _detailRow('Owner', 'N/A'),
-              const SizedBox(height: 4),
-              const Text('This tile is not a purchasable property.',
-                  style: TextStyle(fontSize: 12, color: Colors.grey)),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => setState(() => _detailTileId = null),
+                child: const Text('Close'),
+              ),
             ],
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('Close'),
           ),
-        ],
+        ),
       ),
     );
   }
@@ -1221,11 +1349,8 @@ class _GameScreenState extends State<GameScreen> {
   void _showUpgradePropertyDialog(String tileId, Map<String, dynamic> property) {
     final currentLevel = (property['upgrade_level'] as num?)?.toInt() ?? 0;
     final basePrice = (property['base_price'] as num).toInt();
-    final base = (property['rent'] as List<dynamic>?)?.isNotEmpty == true
-        ? ((property['rent'] as List<dynamic>).first as num).toInt()
-        : basePrice;
-    // upgrade_cost = base * (1 + current_level) / 2
-    final cost = base * (1 + currentLevel) ~/ 2;
+    // upgrade_cost = base_price * (1 + current_level) / 3
+    final cost = basePrice * (1 + currentLevel) ~/ 3;
     final player = _gameState.players[_gameState.activePlayerIndex];
     final canAfford = player.cash >= cost;
 
@@ -1389,6 +1514,17 @@ class _GameScreenState extends State<GameScreen> {
 
   // ---- Build ---------------------------------------------------------------
 
+  /// Build a lookup map of tile_id → display name from the initial tile source.
+  /// Needed because the Rust `Tile` struct only has `name_key`, not `name`.
+  Map<String, String> get _tileNames {
+    final tileSource = _useComplexBoard ? _complexTiles : _defaultTiles;
+    final map = <String, String>{};
+    for (final t in tileSource) {
+      map[t['id']!] = t['name']!;
+    }
+    return map;
+  }
+
   @override
   Widget build(BuildContext context) {
     final activePlayer =
@@ -1397,18 +1533,27 @@ class _GameScreenState extends State<GameScreen> {
             ? _gameState.players[_gameState.activePlayerIndex]
             : null;
 
+    final tileNames = _tileNames;
+
     // Convert raw tiles to BoardTileViewModel for the board
     final rawTiles = (_currentState['board'] as Map<String, dynamic>?)?
             ['tiles'] as List<dynamic>? ??
         [];
     final tiles = rawTiles
-        .map((t) => BoardTileViewModel(
-              id: t['id'] as String,
-              name: t['name'] as String? ??
-                  t['name_key'] as String? ??
-                  t['id'] as String,
-              kind: t['kind'] as String? ?? 'Unknown',
-            ))
+        .map((t) {
+          final id = t['id'] as String;
+          // Prefer the original display name from the tile source; fall back
+          // to name_key or id when Rust strips the 'name' field after round-trip.
+          final displayName = t['name'] as String? ??
+              tileNames[id] ??
+              t['name_key'] as String? ??
+              id;
+          return BoardTileViewModel(
+            id: id,
+            name: displayName,
+            kind: t['kind'] as String? ?? 'Unknown',
+          );
+        })
         .toList();
 
     // Determine player property owners for display
@@ -1436,7 +1581,9 @@ class _GameScreenState extends State<GameScreen> {
     return GameStateWidget(
       data: _gameState,
       onUpdate: (data) => setState(() => _gameState = data),
-      child: Scaffold(
+      child: Stack(
+        children: [
+          Scaffold(
         appBar: AppBar(
           title: const Text('saMonopoly'),
           actions: [
@@ -1516,7 +1663,49 @@ class _GameScreenState extends State<GameScreen> {
           ),
         ),
       ),
-    );
+      // Pre-warm all dialog widget trees at startup via Offstage.
+      // This eliminates first-tap rendering delay for dialogs.
+      Offstage(
+        offstage: _detailTileId == null,
+        child: _buildPropertyOverlay(),
+      ),
+      // Trade dialog pre-warm
+      Offstage(
+        offstage: true,
+        child: AlertDialog(
+          title: const Text('Trade'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                const Text('Select a player and offer:'),
+                const SizedBox(height: 12),
+                Card(
+                  child: ListTile(
+                    title: Text('With ${_gameState.players.isNotEmpty ? _gameState.players[0].name : ''}'),
+                    subtitle: TextField(
+                      controller: TextEditingController(),
+                      decoration: const InputDecoration(
+                        labelText: 'Cash offer',
+                        prefixText: '\$',
+                      ),
+                      keyboardType: TextInputType.number,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: null, child: const Text('Cancel')),
+            FilledButton(onPressed: null, child: const Text('Propose Trade')),
+          ],
+        ),
+      ),
+    ],
+  ),
+);
   }
 
   Widget _buildPlayerInfoBar(PlayerTokenViewModel activePlayer) {
@@ -1656,43 +1845,6 @@ class _GameScreenState extends State<GameScreen> {
               : 'Roll'),
         ),
         const SizedBox(height: 4),
-        // Buy / Upgrade property — only allowed on the turn the player
-        // first arrives at this tile (prevents camping and re-upgrading).
-        OutlinedButton.icon(
-          onPressed: (isMyTurn && _landedTileIdThisTurn != null) ? () {
-            final pos = _gameState
-                .players[_gameState.activePlayerIndex]
-                .tileId;
-            // Only allow if the player is still on the tile they just landed on
-            if (pos != _landedTileIdThisTurn) {
-              _addLog('You must roll to reach this tile first');
-              return;
-            }
-            final prop = _findPropertyAtTile(pos);
-            if (prop != null) {
-              final owner = prop['owner'] as String?;
-              final playerId = _gameState.players[_gameState.activePlayerIndex].id;
-              if (owner == null) {
-                _showBuyPropertyDialog(pos, prop);
-              } else if (owner == playerId) {
-                final maxLevel = (_currentState['max_upgrade_level'] as num?)?.toInt() ?? 3;
-                final currentLevel = (prop['upgrade_level'] as num?)?.toInt() ?? 0;
-                if (maxLevel > 0 && currentLevel < maxLevel) {
-                  _showUpgradePropertyDialog(pos, prop);
-                } else {
-                  _addLog('Property already at max level');
-                }
-              } else {
-                _addLog('This property belongs to another player');
-              }
-            } else {
-              _addLog('No property here');
-            }
-          } : null,
-          icon: const Icon(Icons.build, size: 18),
-          label: const Text('Buy / Upgrade'),
-        ),
-        const SizedBox(height: 4),
         // Trade
         OutlinedButton.icon(
           onPressed: () => _showTradeDialog(),
@@ -1799,10 +1951,10 @@ class _GameSettingsDialogState extends State<_GameSettingsDialog>
   late TextEditingController _jailTurnsCtrl;
   late TextEditingController _hospitalTurnsCtrl;
   late TextEditingController _maxUpgradeCtrl;
-  bool _extensionUpgradeEnabled = false;
-  bool _groupRentEnabled = false;
-  bool _stockMarketEnabled = false;
-  bool _lotteryEnabled = false;
+  bool _extensionUpgradeEnabled = true;
+  bool _groupRentEnabled = true;
+  bool _stockMarketEnabled = true;
+  bool _lotteryEnabled = true;
   bool _auctionEnabled = true;
   bool _mortgageEnabled = true;
   bool _tradeEnabled = true;
@@ -1810,7 +1962,7 @@ class _GameSettingsDialogState extends State<_GameSettingsDialog>
   // ── Network config controllers ───────────────────────────────────────────
   late TextEditingController _hostCtrl;
   late TextEditingController _portCtrl;
-  bool _tlsEnabled = false;
+  bool _tlsEnabled = true;
 
   @override
   void initState() {

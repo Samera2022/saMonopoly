@@ -55,6 +55,12 @@ class CardInventoryDialog extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Group duplicates and count quantities
+    final Map<String, int> cardCounts = {};
+    for (final id in ownedCardIds) {
+      cardCounts[id] = (cardCounts[id] ?? 0) + 1;
+    }
+
     return AlertDialog(
       title: const Text('🎒 Card Inventory'),
       content: SizedBox(
@@ -63,8 +69,8 @@ class CardInventoryDialog extends StatelessWidget {
             ? const Text('You have no cards.')
             : ListView(
                 shrinkWrap: true,
-                children: ownedCardIds
-                    .map((id) => _buildCardTile(context, id))
+                children: cardCounts.entries
+                    .map((e) => _buildCardTile(context, e.key, count: e.value))
                     .toList(),
               ),
       ),
@@ -77,7 +83,7 @@ class CardInventoryDialog extends StatelessWidget {
     );
   }
 
-  Widget _buildCardTile(BuildContext context, String cardId) {
+  Widget _buildCardTile(BuildContext context, String cardId, {int count = 1}) {
     final info = _kCardInfo[cardId];
     if (info == null) {
       return Card(
@@ -94,12 +100,32 @@ class CardInventoryDialog extends StatelessWidget {
         leading: Icon(info.icon, color: Theme.of(context).colorScheme.primary),
         title: Text(info.name),
         subtitle: Text(info.description),
-        trailing: FilledButton.tonal(
-          onPressed: () {
-            onUse(cardId);
-            Navigator.of(context).pop();
-          },
-          child: const Text('Use'),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (count > 1)
+              Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade200,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text(
+                    '×$count',
+                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ),
+            FilledButton.tonal(
+              onPressed: () {
+                onUse(cardId);
+                Navigator.of(context).pop();
+              },
+              child: Text(count > 1 ? 'Use 1' : 'Use'),
+            ),
+          ],
         ),
       ),
     );

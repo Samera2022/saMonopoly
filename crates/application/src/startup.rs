@@ -36,6 +36,7 @@ impl GameBootstrap {
             seed: 1,
             decks: vec![],
             stock_market: None,
+            bail_abuse_count: 0,
             active_auction: None,
             consecutive_doubles: 0,
             max_upgrade_level: 3,
