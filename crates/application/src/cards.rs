@@ -39,57 +39,121 @@ impl CardService {
 pub struct LotteryService;
 
 impl LotteryService {
-    /// Player buys a lottery ticket, pays the cost, and enters the draw.
-    /// Returns the result event.
+    /// Initialize the lottery if not yet active.
+    /// Called on first landing on a Lottery tile or at game start.
+    pub fn ensure_initialized(state: &mut GameState) {
+        if state.lottery_state.is_none() {
+            state.lottery_state = Some(sa_monopoly_domain::LotteryState::new(state.current_turn));
+        }
+    }
+
+    /// Player buys a lottery ticket: chooses a number (1-50) and pays the
+    /// ticket price.  The money goes to the "house" (removed from circulation).
     pub fn buy_ticket(
         state: &mut GameState,
-        rules: &sa_monopoly_domain::LotteryRuleSet,
+        number: u32,
+    ) -> Result<GameEvent, String> {
+        Self::ensure_initialized(state);
+
+        if number < 1 || number > 50 {
+            return Err("lottery number must be between 1 and 50".to_string());
+        }
+
+        let player_id = state
+            .active_player()
+            .map(|p| p.id.clone())
+            .ok_or("no_active_player".to_string())?;
+
+        let lottery = state.lottery_state.as_mut().unwrap();
+        let ticket_price = sa_monopoly_domain::LotteryState::ticket_price_for_turn(state.current_turn);
+
+        // Check if player already picked a number this cycle
+        if lottery.player_numbers.contains_key(&player_id) {
+            return Err("player already picked a number this cycle".to_string());
+        }
+
+        // Check affordability
+        let can_afford = state
+            .players
+            .iter()
+            .any(|p| p.id == player_id && p.cash >= ticket_price);
+        if !can_afford {
+            return Err("insufficient_funds".to_string());
+        }
+
+        // Deduct ticket price (goes to house)
+        if let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) {
+            player.cash -= ticket_price;
+        }
+
+        // Record the player's number choice
+        lottery.player_numbers.insert(player_id.clone(), number);
+
+        Ok(GameEvent::LotteryTicketBought {
+            player_id,
+            number,
+            ticket_price,
+        })
+    }
+
+    /// Execute a lottery draw: pick a random winning number, check all
+    /// players, and award the jackpot if there's a winner.
+    pub fn execute_draw(
+        state: &mut GameState,
         rng: &mut dyn crate::ports::RngService,
     ) -> GameEvent {
-        if !rules.enabled {
-            return GameEvent::CommandRejected { reason: "lottery_disabled".to_string() };
-        }
+        Self::ensure_initialized(state);
 
-        let player_id = match state.active_player().map(|p| p.id.clone()) {
-            Some(id) => id,
-            None => return GameEvent::CommandRejected { reason: "no_active_player".to_string() },
-        };
+        let lottery = state.lottery_state.as_mut().unwrap();
+        let current_turn = state.current_turn;
 
-        // Check if player can afford ticket
-        let can_afford = state.players.iter().any(|p| p.id == player_id && p.cash >= rules.ticket_price);
-        if !can_afford {
-            return GameEvent::CommandRejected { reason: "insufficient_funds".to_string() };
-        }
+        // Calculate current jackpot
+        let jackpot = lottery.effective_jackpot(current_turn);
+        lottery.jackpot = jackpot;
 
-        // Deduct ticket price
-        if let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) {
-            player.cash -= rules.ticket_price;
-        }
+        // Generate winning number (1-50)
+        let winning_number = ((rng.next_u64() % 50) + 1) as u32;
 
-        // Calculate prize: random 1..100, if <= 30 win something
-        let roll = (rng.next_u64() % 100) + 1;
-        let prize = if roll <= 30 {
-            // Win: payout based on roll
-            match roll {
-                1..=5 => 1000,   // jackpot
-                6..=15 => 500,    // big win
-                _ => 100,         // small win
+        // Check if any player chose the winning number
+        let winner_id = lottery
+            .player_numbers
+            .iter()
+            .find(|(_, &num)| num == winning_number)
+            .map(|(pid, _)| pid.clone());
+
+        if let Some(ref winner) = winner_id {
+            // Someone won! Award the jackpot
+            if let Some(player) = state.players.iter_mut().find(|p| p.id == *winner) {
+                player.cash += jackpot;
+            }
+            // Reset everything for the next cycle
+            lottery.player_numbers.clear();
+            lottery.consecutive_no_winner = 0;
+            lottery.last_winning_number = Some(winning_number);
+            lottery.last_winner = winner_id.clone();
+            lottery.draw_pending = false;
+            // Schedule next draw
+            lottery.next_draw_turn = current_turn + 15;
+
+            GameEvent::LotteryDrawResult {
+                winning_number,
+                winner: Some(winner_id.clone().unwrap()),
+                prize: jackpot,
             }
         } else {
-            0  // no win
-        };
+            // No winner: rollover with exponential growth
+            lottery.consecutive_no_winner += 1;
+            lottery.last_winning_number = Some(winning_number);
+            lottery.last_winner = None;
+            lottery.draw_pending = false;
+            // Schedule next draw
+            lottery.next_draw_turn = current_turn + 15;
 
-        // Pay out prize
-        if prize > 0 {
-            if let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) {
-                player.cash += prize;
+            GameEvent::LotteryDrawResult {
+                winning_number,
+                winner: None,
+                prize: 0,
             }
-        }
-
-        GameEvent::LotteryResult {
-            player_id,
-            ticket_price: rules.ticket_price,
-            prize,
         }
     }
 }

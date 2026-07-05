@@ -279,31 +279,63 @@ class BoardWidget extends StatelessWidget {
           Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              // Property color strip at top (for property tiles)
-              if (tile.kind == 'OrdinaryProperty' || tile.kind == 'SpecialProperty')
+              // Property color strip at top (for all ownable property tiles).
+              // When owned, the top strip shows the owner's colour so both
+              // coloured bars always match – avoiding ambiguity when a tile's
+              // kind colour happens to overlap with a player's colour.
+              if (tile.kind == 'OrdinaryProperty' ||
+                  tile.kind == 'SpecialProperty' ||
+                  tile.kind == 'ExtensionProperty')
                 Container(
                   height: 3,
-                  color: tile.color,
+                  color: ownerColor ?? tile.color,
                   margin: const EdgeInsets.only(bottom: 1),
                 ),
-              // Tile name
+              // Tile name with ownership icon
               Expanded(
                 child: Center(
-                  child: Text(
-                    _displayName(tile),
-                    textAlign: TextAlign.center,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: cellSize * 0.12,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.black87,
-                    ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      // Ownership icon: a small house icon shown only when
+                      // the property is owned.  This provides a colour-
+                      // independent visual indicator so ownership is always
+                      // clear even when the tile kind colour matches the
+                      // player's colour.
+                      if (ownerColor != null &&
+                          (tile.kind == 'OrdinaryProperty' ||
+                           tile.kind == 'SpecialProperty' ||
+                           tile.kind == 'ExtensionProperty'))
+                        Padding(
+                          padding: const EdgeInsets.only(right: 2),
+                          child: Icon(
+                            Icons.home,
+                            size: cellSize * 0.14,
+                            color: ownerColor,
+                          ),
+                        ),
+                      Flexible(
+                        child: Text(
+                          _displayName(tile),
+                          textAlign: TextAlign.center,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: cellSize * 0.12,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.black87,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),
-              // Ownership indicator bar at bottom of tile content
-              if (ownerColor != null && (tile.kind == 'OrdinaryProperty' || tile.kind == 'SpecialProperty'))
+              // Ownership indicator bar at bottom of tile content.
+              if (ownerColor != null &&
+                  (tile.kind == 'OrdinaryProperty' ||
+                   tile.kind == 'SpecialProperty' ||
+                   tile.kind == 'ExtensionProperty'))
                 Container(
                   height: 4,
                   color: ownerColor,

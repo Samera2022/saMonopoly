@@ -1,5 +1,5 @@
 use sa_monopoly_domain::tile::SpecialTileKind;
-use sa_monopoly_domain::{CardDeckId, GameState, LotteryRuleSet};
+use sa_monopoly_domain::{CardDeckId, GameState};
 
 use crate::cards::{CardService, LotteryService};
 use crate::economy::EconomyService;
@@ -37,11 +37,15 @@ impl EffectResolver {
                 Some(GameEvent::CardShopList { cards })
             },
             sa_monopoly_domain::TileKind::Lottery => {
-                let lottery_rules = LotteryRuleSet {
-                    enabled: true,
-                    ticket_price: 50,
-                };
-                Some(LotteryService::buy_ticket(state, &lottery_rules, rng))
+                LotteryService::ensure_initialized(state);
+                let lottery = state.lottery_state.as_ref().unwrap();
+                let jackpot = lottery.effective_jackpot(state.current_turn);
+                let ticket_price = sa_monopoly_domain::LotteryState::ticket_price_for_turn(state.current_turn);
+                Some(GameEvent::LotteryAvailable {
+                    ticket_price,
+                    jackpot,
+                    next_draw_turn: lottery.next_draw_turn,
+                })
             },
             sa_monopoly_domain::TileKind::Bank => {
                 if let Some(player) = state.active_player_mut() {
@@ -75,18 +79,27 @@ impl EffectResolver {
                 let owner_id = state.board.property(tile_id).and_then(|p| p.owner.clone());
                 match owner_id {
                     Some(owner) => {
-                        // Use the actual amount returned by pay_rent (which reflects
-                        // any double_rent card doubling), not the static current_rent.
-                        let (actual_amount, _card_consumed) =
-                            EconomyService::pay_rent(state, tile_id).ok()?;
-                        Some(GameEvent::RentPaid {
-                            from_player_id: state
-                                .active_player()
-                                .map(|p| p.id.clone())
-                                .unwrap_or_default(),
-                            to_player_id: owner,
-                            amount: actual_amount,
-                        })
+                        let active_player_id = state
+                            .active_player()
+                            .map(|p| p.id.clone())
+                            .unwrap_or_default();
+                        // If the player lands on their own property, skip rent and
+                        // emit a special event so the turn processor can offer an upgrade.
+                        if owner == active_player_id {
+                            Some(GameEvent::CommandAccepted {
+                                name: "own_property".to_string(),
+                            })
+                        } else {
+                            // Use the actual amount returned by pay_rent (which reflects
+                            // any double_rent card doubling), not the static current_rent.
+                            let (actual_amount, _card_consumed) =
+                                EconomyService::pay_rent(state, tile_id).ok()?;
+                            Some(GameEvent::RentPaid {
+                                from_player_id: active_player_id,
+                                to_player_id: owner,
+                                amount: actual_amount,
+                            })
+                        }
                     }
                     None => Some(GameEvent::CommandAccepted {
                         name: "unowned_property".to_string(),

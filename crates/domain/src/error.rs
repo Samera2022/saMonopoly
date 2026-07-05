@@ -45,6 +45,15 @@ pub enum DomainError {
 
     #[error("board error: {0}")]
     BoardError(String),
+
+    #[error("upgrade not owned by active player: {0}")]
+    UpgradeNotOwned(String),
+
+    #[error("upgrades are disabled (max_upgrade_level = 0)")]
+    UpgradesDisabled,
+
+    #[error("property {0} already at max upgrade level {1}")]
+    MaxUpgradeLevel(String, u64),
 }
 
 #[cfg(test)]
@@ -114,5 +123,17 @@ mod tests {
         // AuctionError
         let err = DomainError::AuctionError("bid too low".to_string());
         assert_eq!(err.to_string(), "auction error: bid too low");
+
+        // UpgradeNotOwned
+        let err = DomainError::UpgradeNotOwned("Park Place".to_string());
+        assert_eq!(err.to_string(), "upgrade not owned by active player: Park Place");
+
+        // UpgradesDisabled
+        let err = DomainError::UpgradesDisabled;
+        assert_eq!(err.to_string(), "upgrades are disabled (max_upgrade_level = 0)");
+
+        // MaxUpgradeLevel
+        let err = DomainError::MaxUpgradeLevel("Boardwalk".to_string(), 5);
+        assert_eq!(err.to_string(), "property Boardwalk already at max upgrade level 5");
     }
 }

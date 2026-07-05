@@ -1,5 +1,6 @@
 #![allow(clippy::type_complexity)]
 pub mod ai;
+pub mod config;
 pub mod content;
 pub mod discovery;
 pub mod llm;

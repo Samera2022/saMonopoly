@@ -1,8 +1,10 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::property::Property;
 use crate::tile::Tile;
-use crate::types::TileId;
+use crate::types::{Money, TileId};
 
 /// Represents a directed edge between two tiles in the board graph.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +80,106 @@ impl Board {
         let next_index = (index + 1) % self.tiles.len();
         self.tiles.get(next_index).map(|tile| tile.id.clone())
     }
+
+    // ── Group (Union-Find) Rent Logic ─────────────────────────────────────
+
+    /// Build a union-find map from `linked_targets` on all properties.
+    /// Returns a map: tile_id → root_tile_id (group representative).
+    fn build_union_find(&self) -> HashMap<TileId, TileId> {
+        let mut parent: HashMap<TileId, TileId> = HashMap::new();
+
+        // Each property is its own parent initially
+        for prop in &self.properties {
+            parent.entry(prop.tile_id.clone()).or_insert_with(|| prop.tile_id.clone());
+        }
+
+        // Union: for each linked_target, union the two tile IDs
+        for prop in &self.properties {
+            for target in &prop.linked_targets {
+                Self::union(&mut parent, &prop.tile_id, target);
+            }
+        }
+
+        // Path compression
+        for key in parent.keys().cloned().collect::<Vec<_>>() {
+            Self::find(&mut parent, &key);
+        }
+
+        parent
+    }
+
+    fn find(parent: &mut HashMap<TileId, TileId>, x: &TileId) -> TileId {
+        let p = parent.get(x).cloned().unwrap_or_else(|| x.clone());
+        if p != *x {
+            let root = Self::find(parent, &p);
+            parent.insert(x.clone(), root.clone());
+            root
+        } else {
+            x.clone()
+        }
+    }
+
+    fn union(parent: &mut HashMap<TileId, TileId>, a: &TileId, b: &TileId) {
+        let ra = Self::find(parent, a);
+        let rb = Self::find(parent, b);
+        if ra != rb {
+            parent.insert(ra, rb.clone());
+        }
+    }
+
+    /// If group rent is enabled and all properties in the same linked group
+    /// as `tile_id` are owned by the same player, return the sum of all
+    /// group members' current rent.  Otherwise return `None`.
+    pub fn group_rent(&self, tile_id: &str) -> Option<Money> {
+        // Find the property for this tile
+        let prop = self.property(tile_id)?;
+        if prop.linked_targets.is_empty() {
+            return None; // no group defined
+        }
+
+        // Build union-find and find the group root
+        let mut uf = self.build_union_find();
+        let tid = tile_id.to_string();
+        let root = Self::find(&mut uf, &tid);
+
+        // Collect all members of this group
+        let members: Vec<TileId> = uf
+            .iter()
+            .filter(|(_, r)| **r == root)
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        if members.is_empty() {
+            return None;
+        }
+
+        // Check that all members have the same owner
+        let first_owner: Option<String> = self
+            .property(&members[0])
+            .and_then(|p| p.owner.clone());
+
+        let owner = match first_owner {
+            Some(ref o) => o.clone(),
+            None => return None,
+        };
+
+        // If any member is unowned or has a different owner, no group rent
+        for member_id in &members {
+            match self.property(member_id) {
+                Some(p) if p.owner.as_deref() == Some(&owner) => {}
+                _ => return None,
+            }
+        }
+
+        // All owned by same player → sum all members' current rent
+        let total: Money = members
+            .iter()
+            .filter_map(|mid| self.property(mid))
+            .map(|p| p.current_rent())
+            .sum();
+
+        if total > 0 { Some(total) } else { None }
+    }
 }
 
 #[cfg(test)]
@@ -107,6 +209,7 @@ mod tests {
             upgrade_level: 0,
             owner: None,
             is_mortgaged: false,
+            linked_targets: vec![],
         }
     }
 

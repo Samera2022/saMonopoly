@@ -10,7 +10,9 @@ use crate::ports::RngService;
 pub enum PlayerDecision {
     /// Player chooses to buy the property they landed on.
     BuyProperty(String), // tile_id
-    /// Player chooses to do nothing (skip buying, pass).
+    /// Player chooses to upgrade the property they landed on.
+    UpgradeProperty(String), // tile_id
+    /// Player chooses to do nothing (skip buying/upgrading, pass).
     Pass,
 }
 
@@ -21,6 +23,15 @@ pub trait DecisionMaker {
         state: &GameState,
         tile_id: &str,
         price: i64,
+    ) -> PlayerDecision;
+
+    /// Called when the active player lands on their own property.
+    /// Return `UpgradeProperty(tile_id)` to upgrade, or `Pass` to skip.
+    fn decide_upgrade_property(
+        &mut self,
+        state: &GameState,
+        tile_id: &str,
+        current_level: u32,
     ) -> PlayerDecision;
 }
 
@@ -68,14 +79,17 @@ impl TurnProcessor {
             _ => {}
         }
 
-        // Phase 2: After landing, check if the player can buy the property
+        // Phase 2: After landing, check if the player can buy or upgrade the property
         // Get the player's current position
         if let Some(player) = state.active_player() {
             let tile_id = &player.position;
 
-            // Check if this tile has a purchasable property
+            // Check if this tile has a property
             if let Some(property) = state.board.property(tile_id) {
+                let pid = &player.id;
+
                 if property.owner.is_none() && !property.base_price.is_negative() {
+                    // Unowned property → offer to buy
                     let decision =
                         decision_maker.decide_buy_property(state, tile_id, property.base_price);
                     match decision {
@@ -89,7 +103,27 @@ impl TurnProcessor {
                             );
                             events.push(buy_event);
                         }
-                        PlayerDecision::Pass => {}
+                        _ => {}
+                    }
+                } else if property.owner.as_deref() == Some(pid.as_str()) {
+                    // Own property → offer to upgrade
+                    let decision = decision_maker.decide_upgrade_property(
+                        state,
+                        tile_id,
+                        property.upgrade_level,
+                    );
+                    match decision {
+                        PlayerDecision::UpgradeProperty(_) => {
+                            let upgrade_event = GameEngine::execute(
+                                GameCommand::UpgradeProperty {
+                                    tile_id: tile_id.clone(),
+                                },
+                                state,
+                                rng,
+                            );
+                            events.push(upgrade_event);
+                        }
+                        _ => {}
                     }
                 }
             }
