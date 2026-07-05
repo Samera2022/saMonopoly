@@ -36,4 +36,6 @@ pub enum GameCommand {
     BuyLotteryTicket { number: u32 },
     /// Player uses a card from their inventory.
     UseCard { card_id: String },
+    /// Pay bail to get out of jail early ($50).
+    PayBail,
 }

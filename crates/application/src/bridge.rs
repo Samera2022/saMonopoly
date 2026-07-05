@@ -27,6 +27,18 @@ impl BridgeRng {
     fn new(seed: u64) -> Self {
         Self { state: seed.max(1) }
     }
+
+    /// Expose the current RNG state so callers can persist it back
+    /// to the game state (preventing identical sequences on re-play).
+    ///
+    /// The state is masked to 48 bits to ensure it fits within
+    /// JavaScript's safe integer range (2^53) when serialised
+    /// through JSON between the Rust engine and the Flutter/Dart
+    /// frontend. 48 bits (2^48 ≈ 2.8×10^14) provides ample
+    /// entropy for a board game PRNG.
+    fn current_state(&self) -> u64 {
+        self.state & 0xFFFFFFFFFFFF
+    }
 }
 
 impl crate::ports::RngService for BridgeRng {
@@ -47,6 +59,10 @@ impl EngineBridge {
         let mut state = request.state;
         let mut rng = BridgeRng::new(state.seed);
         let event = GameEngine::execute(request.command, &mut state, &mut rng);
+        // Persist the RNG state back to the game state seed so the next
+        // command call continues the sequence rather than restarting from
+        // the same seed (which would produce identical dice rolls etc.).
+        state.seed = rng.current_state();
         BridgeResponse { event, state }
     }
 
@@ -82,6 +98,7 @@ impl EngineBridge {
                 extension_upgrade_enabled: false,
                 group_rent_enabled: false,
                 lottery_state: None,
+                bail_abuse_count: 0,
             },
         }
     }

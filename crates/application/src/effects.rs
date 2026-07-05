@@ -49,14 +49,14 @@ impl EffectResolver {
             },
             sa_monopoly_domain::TileKind::Bank => {
                 // Differentiate based on tile_id:
-                //   "tax_1" = Income Tax: pay $200
+                //   "tax_1" = Income Tax: pay $150 (reduced from $200 to ease early-game burden)
                 //   "tax_2" = Luxury Tax: pay $100
                 //   otherwise = Free Parking: receive $200
                 let event_name = if tile_id == "tax_1" {
                     if let Some(player) = state.active_player_mut() {
-                        player.cash -= 200;
+                        player.cash -= 150;
                     }
-                    "income_tax_200"
+                    "income_tax_150"
                 } else if tile_id == "tax_2" {
                     if let Some(player) = state.active_player_mut() {
                         player.cash -= 100;
@@ -72,21 +72,27 @@ impl EffectResolver {
             },
             sa_monopoly_domain::TileKind::Jail => {
                 if tile_id == "go_to_jail" {
-                    let player_id =
-                        state.active_player().map(|p| p.id.clone()).unwrap_or_default();
+                    // Clone fields BEFORE any borrow
+                    let abuse = state.bail_abuse_count;
+                    let player_id = state.players
+                        .get(state.active_player_index)
+                        .map(|p| p.id.clone())
+                        .unwrap_or_default();
                     // Find the "Jail" tile to send player to
                     let jail_tile_id = state.board.tiles.iter()
                         .find(|t| t.id == "jail" || (t.kind == sa_monopoly_domain::TileKind::Jail && t.id != "go_to_jail"))
                         .map(|t| t.id.clone());
+                    // Base 3 turns + 1 per prior bail abuse
+                    let total_turns = 3 + abuse;
                     if let Some(player) = state.active_player_mut() {
-                        player.jail_turns = 3;
+                        player.jail_turns = total_turns;
                         if let Some(jail_id) = jail_tile_id {
                             player.position = jail_id;
                         }
                     }
                     Some(GameEvent::PlayerSentToJail {
                         player_id,
-                        turns: 3,
+                        turns: total_turns,
                     })
                 } else {
                     // Just Visiting — no effect

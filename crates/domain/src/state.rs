@@ -37,6 +37,9 @@ pub struct GameState {
     pub group_rent_enabled: bool,
     /// State of the lottery sub-system (None = lottery not yet initialized).
     pub lottery_state: Option<LotteryState>,
+    /// How many times the active player has used bail to get out of jail.
+    /// Each use adds +1 to the next jail term.
+    pub bail_abuse_count: u32,
 }
 
 impl GameState {

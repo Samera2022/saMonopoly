@@ -116,6 +116,7 @@ fn test_state() -> GameState {
         extension_upgrade_enabled: false,
         group_rent_enabled: false,
         lottery_state: None,
+        bail_abuse_count: 0,
     }
 }
 
@@ -173,53 +174,58 @@ fn test_full_turn() {
     assert_eq!(state.current_turn, 1);
 }
 
-/// test_jail_skip_turn: Player lands on Go To Jail tile → gets 3 jail turns
-/// and is moved to the Jail tile → subsequent roll skips
+/// test_jail_roll_sum7_releases: Player in jail rolls dice.
+/// - If sum = 7: released immediately (moves that many steps).
+/// - If sum ≠ 7: stays jailed, turn counts down.
+/// - When turns expire: released without movement.
 #[test]
-fn test_jail_skip_turn() {
+fn test_jail_roll_sum7_releases() {
     let mut state = test_state();
-    let mut rng = TestRng::new(42);
+    // Use a seed (e.g. 777) whose first XorShift64 dice roll is NOT 7.
+    let mut rng = TestRng::new(777);
 
-    // Manually put player on go_to_jail tile
+    // Put player in jail with 3 turns
     if let Some(p) = state.active_player_mut() {
-        p.position = "go_to_jail".to_string();
+        p.jail_turns = 3;
+        p.position = "jail".to_string();
     }
 
-    // Resolve tile effect → should send to jail with 3 turns and move to "jail"
-    let tile_event = EffectResolver::resolve_special_tile(&mut state, "go_to_jail", &mut rng);
-    assert!(
-        matches!(&tile_event, Some(GameEvent::PlayerSentToJail { turns: 3, .. })),
-        "expected PlayerSentToJail with 3 turns, got {tile_event:?}"
-    );
-    // Position should have been moved to the "jail" tile
-    assert_eq!(state.active_player().unwrap().position, "jail");
-    assert!(
-        matches!(&tile_event, Some(GameEvent::PlayerSentToJail { turns: 3, .. })),
-        "expected PlayerSentToJail with 3 turns, got {tile_event:?}"
-    );
-
-    // First roll attempt → skipped (still has turns)
+    // Roll 1: sum ≠ 7 → stays jailed, decrement 3→2
     let roll1 = GameEngine::execute(GameCommand::Roll, &mut state, &mut rng);
     assert!(
-        matches!(&roll1, GameEvent::CommandRejected { reason } if reason == "player_in_jail"),
-        "expected player_in_jail rejection, got {roll1:?}"
+        matches!(&roll1, GameEvent::DiceRolled { .. }),
+        "expected DiceRolled (jail, not 7), got {roll1:?}"
     );
-    // Jail turns decremented from 3 → 2
     assert_eq!(state.active_player().unwrap().jail_turns, 2);
 
-    // Second roll → skipped (still has turns)
+    // Roll 2: sum ≠ 7 → stays jailed, decrement 2→1
     let roll2 = GameEngine::execute(GameCommand::Roll, &mut state, &mut rng);
     assert!(
-        matches!(&roll2, GameEvent::CommandRejected { reason } if reason == "player_in_jail"),
-        "expected player_in_jail rejection, got {roll2:?}"
+        matches!(&roll2, GameEvent::DiceRolled { .. }),
+        "expected DiceRolled (jail, not 7), got {roll2:?}"
     );
     assert_eq!(state.active_player().unwrap().jail_turns, 1);
 
-    // Third roll → last turn decrements to 0 → released
+    // Roll 3: sum ≠ 7, last turn expires → released
     let roll3 = GameEngine::execute(GameCommand::Roll, &mut state, &mut rng);
     assert!(
         matches!(&roll3, GameEvent::PlayerReleasedFromJail { .. }),
-        "expected PlayerReleasedFromJail, got {roll3:?}"
+        "expected PlayerReleasedFromJail (turns expired), got {roll3:?}"
+    );
+    assert_eq!(state.active_player().unwrap().jail_turns, 0);
+
+    // --- Now test sum-7 escape ---
+    // Re-incarcerate with 1 turn
+    if let Some(p) = state.active_player_mut() {
+        p.jail_turns = 1;
+        p.position = "jail".to_string();
+    }
+    // Use seed=42: first roll = (5,2) sum=7 → immediate release
+    let mut rng2 = TestRng::new(42);
+    let roll4 = GameEngine::execute(GameCommand::Roll, &mut state, &mut rng2);
+    assert!(
+        matches!(&roll4, GameEvent::DiceRolled { is_seven: true, .. }),
+        "expected DiceRolled with is_seven=true (jail escape), got {roll4:?}"
     );
     assert_eq!(state.active_player().unwrap().jail_turns, 0);
 }

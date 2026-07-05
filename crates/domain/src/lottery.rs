@@ -62,9 +62,13 @@ impl LotteryState {
     }
 
     /// Calculate the current effective jackpot using the rollover multiplier.
+    ///
+    /// The rollover multiplier is capped at 5.0× to prevent exponential explosion
+    /// while still allowing exciting jackpot growth over long dry streaks.
+    /// At cap: after ~4 consecutive no-winner cycles (1.5^4 ≈ 5.06).
     pub fn effective_jackpot(&self, current_turn: u64) -> i64 {
         let base = Self::base_jackpot(current_turn);
-        let multiplier = 1.5_f64.powi(self.consecutive_no_winner as i32);
+        let multiplier = (1.5_f64.powi(self.consecutive_no_winner as i32)).min(5.0);
         (base as f64 * multiplier) as i64
     }
 

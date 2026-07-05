@@ -23,6 +23,7 @@ impl GameSession {
                 extension_upgrade_enabled: false,
                 group_rent_enabled: false,
                 lottery_state: None,
+                bail_abuse_count: 0,
             },
         }
     }

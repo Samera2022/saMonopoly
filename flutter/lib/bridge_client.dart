@@ -384,14 +384,96 @@ class BridgeClient {
         seed ^= seed >> 7;
         seed ^= seed << 17;
         final dice2 = (seed & 0x7fffffff) % 6 + 1;
-        state['seed'] = seed;
+        // Mask to 48 bits for JSON-safe round-trip (matching Rust BridgeRng).
+        state['seed'] = seed & 0xFFFFFFFFFFFF;
+
+        // ─── Go To Jail helper ─────────────────────────────────────────────────
+        // Sets jail_turns to 3 + bail_abuse_count and moves player to jail tile.
+        void _sendToJail(Map<String, dynamic> st, int abuseCount) {
+          final idx = st['active_player_index'] as int? ?? 0;
+          final pl = List<Map<String, dynamic>>.from(
+              (st['players'] as List<dynamic>?)?.cast() ?? []);
+          if (idx < pl.length) {
+            final p = Map<String, dynamic>.from(pl[idx]);
+            final total = 3 + abuseCount;
+            p['jail_turns'] = total;
+            // Find jail tile
+            final tiles = (st['board'] as Map<String, dynamic>?)?
+                ['tiles'] as List<dynamic>? ?? [];
+            final jailTile = tiles.cast<Map<String, dynamic>>().firstWhere(
+                (t) => t['id'] == 'jail',
+                orElse: () => const <String, dynamic>{});
+            if (jailTile.isNotEmpty) {
+              p['position'] = jailTile['id'];
+            }
+            pl[idx] = p;
+            st['players'] = pl;
+          }
+        }
 
         final steps = dice1 + dice2;
+        final isSeven = dice1 + dice2 == 7;
         final activeIdx = state['active_player_index'] as int? ?? 0;
         final players = List<Map<String, dynamic>>.from(
             (state['players'] as List<dynamic>?)?.cast() ?? []);
         if (activeIdx < players.length) {
           final player = Map<String, dynamic>.from(players[activeIdx]);
+          final jailTurns = (player['jail_turns'] as num?)?.toInt() ?? 0;
+          final hospitalTurns = (player['hospital_turns'] as num?)?.toInt() ?? 0;
+
+          if (hospitalTurns > 0) {
+            // Hospital: just decrement and skip (no dice shown).
+            player['hospital_turns'] = hospitalTurns - 1;
+            players[activeIdx] = player;
+            state['players'] = players;
+            event['event_type'] = 'CommandRejected';
+            event['reason'] = 'player_in_hospital';
+            break;
+          }
+
+          if (jailTurns > 0) {
+            if (isSeven) {
+              // Rolled 7 → released! Move normally.
+              player['jail_turns'] = 0;
+              final tiles = (state['board'] as Map<String, dynamic>?)?
+                      ['tiles'] as List<dynamic>? ??
+                  [];
+              final currentPos = tiles.indexWhere(
+                  (t) => t['id'] == player['position']);
+              final newIdx = (currentPos + steps) %
+                  (tiles.length > 0 ? tiles.length : 1);
+              if (tiles.isNotEmpty) {
+                player['position'] = tiles[newIdx]['id'];
+              }
+              players[activeIdx] = player;
+              state['players'] = players;
+              event['event_type'] = 'DiceRolled';
+              event['dice1'] = dice1;
+              event['dice2'] = dice2;
+              event['is_seven'] = true;
+              event['consecutive'] = 0;
+              event['player_id'] = player['id'];
+              event['to_tile'] = player['position'];
+            } else {
+              // Failed roll — stay jailed, decrement.
+              player['jail_turns'] = jailTurns - 1;
+              players[activeIdx] = player;
+              state['players'] = players;
+              final stillJailed = player['jail_turns'] > 0;
+              if (stillJailed) {
+                event['event_type'] = 'DiceRolled';
+                event['dice1'] = dice1;
+                event['dice2'] = dice2;
+                event['is_seven'] = false;
+              } else {
+                event['event_type'] = 'PlayerReleasedFromJail';
+                event['player_id'] = player['id'];
+              }
+            }
+            break;
+          }
+
+          // Normal roll (not in jail/hospital)
           final tiles = (state['board'] as Map<String, dynamic>?)?
                   ['tiles'] as List<dynamic>? ??
               [];
@@ -404,11 +486,10 @@ class BridgeClient {
           }
           players[activeIdx] = player;
           state['players'] = players;
-          // DiceRolled event (mirrors Rust engine behavior)
           event['event_type'] = 'DiceRolled';
           event['dice1'] = dice1;
           event['dice2'] = dice2;
-          event['is_seven'] = dice1 + dice2 == 7;
+          event['is_seven'] = isSeven;
           event['consecutive'] = 0;
           event['player_id'] = player['id'];
           event['to_tile'] = player['position'];
@@ -476,10 +557,8 @@ class BridgeClient {
             final currentLevel =
                 (prop['upgrade_level'] as num?)?.toInt() ?? 0;
             final basePrice = (prop['base_price'] as num).toInt();
-            final base = (prop['rent'] as List<dynamic>?)?.isNotEmpty == true
-                ? ((prop['rent'] as List<dynamic>).first as num).toInt()
-                : basePrice;
-            final cost = base * (1 + currentLevel) ~/ 2;
+            // Upgrade cost = base_price * (1 + level) / 3
+            final cost = basePrice * (1 + currentLevel) ~/ 3;
             // Deduct cost from active player
             final upPlayers = List<Map<String, dynamic>>.from(
                 (state['players'] as List<dynamic>?)?.cast() ?? []);
@@ -531,6 +610,28 @@ class BridgeClient {
         event['to_player_id'] =
             request.command.params?['to_player_id'] as String? ?? '';
         break;
+
+      case 'PayBail': {
+        final idx = state['active_player_index'] as int? ?? 0;
+        int paidAmount = 0;
+        final pl = List<Map<String, dynamic>>.from(
+            (state['players'] as List<dynamic>?)?.cast() ?? []);
+        if (idx < pl.length) {
+          final p = Map<String, dynamic>.from(pl[idx]);
+          final jailTurns = (p['jail_turns'] as num?)?.toInt() ?? 0;
+          paidAmount = jailTurns * 50;
+          p['cash'] = ((p['cash'] as num?)?.toInt() ?? 0) - paidAmount;
+          p['jail_turns'] = 0;
+          pl[idx] = p;
+          state['players'] = pl;
+        }
+        final abuseCount = (state['bail_abuse_count'] as num?)?.toInt() ?? 0;
+        state['bail_abuse_count'] = abuseCount + 1;
+        event['event_type'] = 'BailPaid';
+        event['player_id'] = _activePlayerId(state);
+        event['amount'] = paidAmount;
+        break;
+      }
 
       case 'BuyCard':
         final cardId =

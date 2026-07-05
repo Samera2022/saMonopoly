@@ -129,8 +129,8 @@ class GameConfig {
     this.rulesetId = 'classic',
     this.startingCash = 1500,
     this.maxPlayers = 4,
-    this.stockMarketEnabled = false,
-    this.lotteryEnabled = false,
+    this.stockMarketEnabled = true,
+    this.lotteryEnabled = true,
     this.passStartBonus = 200,
     this.jailEscapeTurns = 3,
     this.hospitalRecoveryTurns = 2,
@@ -138,8 +138,8 @@ class GameConfig {
     this.mortgageEnabled = true,
     this.tradeEnabled = true,
     this.maxUpgradeLevel = 3,
-    this.extensionUpgradeEnabled = false,
-    this.groupRentEnabled = false,
+    this.extensionUpgradeEnabled = true,
+    this.groupRentEnabled = true,
   });
 
   factory GameConfig.fromJson(Map<String, dynamic> json) => GameConfig(
@@ -147,8 +147,8 @@ class GameConfig {
         startingCash: (json['starting_cash'] as num?)?.toInt() ?? 1500,
         maxPlayers: (json['max_players'] as num?)?.toInt() ?? 4,
         stockMarketEnabled:
-            json['stock_market_enabled'] as bool? ?? false,
-        lotteryEnabled: json['lottery_enabled'] as bool? ?? false,
+            json['stock_market_enabled'] as bool? ?? true,
+        lotteryEnabled: json['lottery_enabled'] as bool? ?? true,
         passStartBonus: (json['pass_start_bonus'] as num?)?.toInt() ?? 200,
         jailEscapeTurns:
             (json['jail_escape_turns'] as num?)?.toInt() ?? 3,
@@ -159,9 +159,9 @@ class GameConfig {
         tradeEnabled: json['trade_enabled'] as bool? ?? true,
         maxUpgradeLevel: (json['max_upgrade_level'] as num?)?.toInt() ?? 3,
         extensionUpgradeEnabled:
-            json['extension_upgrade_enabled'] as bool? ?? false,
+            json['extension_upgrade_enabled'] as bool? ?? true,
         groupRentEnabled:
-            json['group_rent_enabled'] as bool? ?? false,
+            json['group_rent_enabled'] as bool? ?? true,
       );
 
   Map<String, dynamic> toJson() => {
@@ -293,7 +293,7 @@ class NetworkConfig {
     this.host = '127.0.0.1',
     this.port = 9000,
     this.path = '/ws',
-    this.tls = false,
+    this.tls = true,
     this.maxMessageSize = 262144,
     this.pingIntervalSecs = 30,
   });
@@ -302,7 +302,7 @@ class NetworkConfig {
         host: json['host'] as String? ?? '127.0.0.1',
         port: (json['port'] as num?)?.toInt() ?? 9000,
         path: json['path'] as String? ?? '/ws',
-        tls: json['tls'] as bool? ?? false,
+        tls: json['tls'] as bool? ?? true,
         maxMessageSize: (json['max_message_size'] as num?)?.toInt() ?? 262144,
         pingIntervalSecs:
             (json['ping_interval_secs'] as num?)?.toInt() ?? 30,

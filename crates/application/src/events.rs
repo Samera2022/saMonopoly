@@ -55,6 +55,8 @@ pub enum GameEvent {
     LotteryDrawResult { winning_number: u32, winner: Option<String>, prize: i64 },
     // Card usage
     CardUsed { player_id: String, card_id: String },
+    // Bail
+    BailPaid { player_id: String, amount: i64 },
 }
 
 pub trait EventBus<E> {
