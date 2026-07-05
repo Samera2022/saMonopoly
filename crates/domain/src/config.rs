@@ -112,6 +112,10 @@ pub struct GameConfig {
     /// can also be upgraded.  When true, they follow the same formula-based
     /// upgrade cost and rent calculation as Ordinary properties.
     pub extension_upgrade_enabled: bool,
+    /// Whether group rent is enabled.  When enabled, if all properties in a
+    /// linked group are owned by the same player, rent is the sum of all
+    /// group members' individual rent.
+    pub group_rent_enabled: bool,
 }
 
 impl Default for GameConfig {
@@ -130,6 +134,7 @@ impl Default for GameConfig {
             trade_enabled: true,
             max_upgrade_level: 3,
             extension_upgrade_enabled: false,
+            group_rent_enabled: false,
         }
     }
 }

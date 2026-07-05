@@ -218,7 +218,14 @@ impl EconomyService {
             .as_ref()
             .ok_or_else(|| DomainError::PropertyNotOwned(tile_id.to_string()))?
             .clone();
-        let mut amount = property.current_rent();
+
+        // If group rent is enabled, check if the player owns all properties
+        // in the same linked group and sum their rents.
+        let mut amount = if state.group_rent_enabled {
+            state.board.group_rent(tile_id).unwrap_or_else(|| property.current_rent())
+        } else {
+            property.current_rent()
+        };
 
         // ─── Double Rent card check ─────────────────────────────────────────────
         // If the paying player has a "double_rent" card, consume it and double the

@@ -33,6 +33,8 @@ pub struct GameState {
     pub max_upgrade_level: u64,
     /// Whether Extension properties (utilities) can be upgraded.
     pub extension_upgrade_enabled: bool,
+    /// Whether group rent is enabled (sum of all linked group members' rent).
+    pub group_rent_enabled: bool,
     /// State of the lottery sub-system (None = lottery not yet initialized).
     pub lottery_state: Option<LotteryState>,
 }

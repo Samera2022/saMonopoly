@@ -1398,6 +1398,7 @@ class _GameSettingsDialogState extends State<_GameSettingsDialog>
   late TextEditingController _hospitalTurnsCtrl;
   late TextEditingController _maxUpgradeCtrl;
   bool _extensionUpgradeEnabled = false;
+  bool _groupRentEnabled = false;
   bool _stockMarketEnabled = false;
   bool _lotteryEnabled = false;
   bool _auctionEnabled = true;
@@ -1443,6 +1444,7 @@ class _GameSettingsDialogState extends State<_GameSettingsDialog>
     _maxUpgradeCtrl =
         TextEditingController(text: game.maxUpgradeLevel.toString());
     _extensionUpgradeEnabled = game.extensionUpgradeEnabled;
+    _groupRentEnabled = game.groupRentEnabled;
     _stockMarketEnabled = game.stockMarketEnabled;
     _lotteryEnabled = game.lotteryEnabled;
     _auctionEnabled = game.auctionEnabled;
@@ -1503,6 +1505,7 @@ class _GameSettingsDialogState extends State<_GameSettingsDialog>
       hospitalRecoveryTurns: int.tryParse(_hospitalTurnsCtrl.text) ?? 2,
       maxUpgradeLevel: int.tryParse(_maxUpgradeCtrl.text) ?? 3,
       extensionUpgradeEnabled: _extensionUpgradeEnabled,
+      groupRentEnabled: _groupRentEnabled,
       stockMarketEnabled: _stockMarketEnabled,
       lotteryEnabled: _lotteryEnabled,
       auctionEnabled: _auctionEnabled,
@@ -1711,6 +1714,15 @@ class _GameSettingsDialogState extends State<_GameSettingsDialog>
           dense: true,
           contentPadding: EdgeInsets.zero,
           onChanged: (v) => setState(() => _extensionUpgradeEnabled = v),
+        ),
+        const SizedBox(height: 4),
+        SwitchListTile(
+          title: const Text('Group Rent'),
+          subtitle: const Text('Sum rent when full group owned'),
+          value: _groupRentEnabled,
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          onChanged: (v) => setState(() => _groupRentEnabled = v),
         ),
         const SizedBox(height: 4),
         SwitchListTile(

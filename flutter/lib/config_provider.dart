@@ -120,6 +120,10 @@ class GameConfig {
   /// Whether Extension properties (utilities: Electric Co, Water Works)
   /// can also be upgraded using the same formula-based system.
   final bool extensionUpgradeEnabled;
+  /// Whether group rent is enabled.  When enabled, if all properties in a
+  /// linked group are owned by the same player, rent is the sum of all
+  /// group members' individual rent.
+  final bool groupRentEnabled;
 
   const GameConfig({
     this.rulesetId = 'classic',
@@ -135,6 +139,7 @@ class GameConfig {
     this.tradeEnabled = true,
     this.maxUpgradeLevel = 3,
     this.extensionUpgradeEnabled = false,
+    this.groupRentEnabled = false,
   });
 
   factory GameConfig.fromJson(Map<String, dynamic> json) => GameConfig(
@@ -155,6 +160,8 @@ class GameConfig {
         maxUpgradeLevel: (json['max_upgrade_level'] as num?)?.toInt() ?? 3,
         extensionUpgradeEnabled:
             json['extension_upgrade_enabled'] as bool? ?? false,
+        groupRentEnabled:
+            json['group_rent_enabled'] as bool? ?? false,
       );
 
   Map<String, dynamic> toJson() => {
@@ -171,6 +178,7 @@ class GameConfig {
         'trade_enabled': tradeEnabled,
         'max_upgrade_level': maxUpgradeLevel,
         'extension_upgrade_enabled': extensionUpgradeEnabled,
+        'group_rent_enabled': groupRentEnabled,
       };
 }
 

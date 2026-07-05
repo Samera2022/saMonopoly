@@ -43,6 +43,12 @@ pub struct Property {
     pub owner: Option<String>,
     #[serde(default)]
     pub is_mortgaged: bool,
+    /// IDs of other properties that form a group with this one.
+    /// When group rent is enabled and all properties in the group are owned
+    /// by the same player, the rent paid is the sum of all group members'
+    /// individual rent.
+    #[serde(default)]
+    pub linked_targets: Vec<TileId>,
 }
 
 impl Property {
@@ -93,6 +99,7 @@ mod tests {
             upgrade_level: level,
             owner: None,
             is_mortgaged: false,
+            linked_targets: vec![],
         }
     }
 
