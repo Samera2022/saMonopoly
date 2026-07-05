@@ -216,6 +216,7 @@ mod tests {
                 tiles: vec![],
                 properties: vec![],
                 graph: BoardGraph::default(),
+                auto_link_rent: false,
             },
             players: vec![Player {
                 id: "p1".to_string(),

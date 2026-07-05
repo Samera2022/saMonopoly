@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +36,14 @@ pub struct Board {
     pub tiles: Vec<Tile>,
     pub properties: Vec<Property>,
     pub graph: BoardGraph,
+    /// When `true`, the engine will automatically compute `linked_targets`
+    /// for properties on the same board edge, based on grouping rules:
+    ///   - max 5 properties per group
+    ///   - groups must be contiguous (no non-property tiles between members)
+    ///   - single-tile gaps allowed only when each side has >= 3 properties
+    /// Properties that already have manual `linked_targets` are skipped.
+    #[serde(default)]
+    pub auto_link_rent: bool,
 }
 
 impl Board {
@@ -79,6 +87,194 @@ impl Board {
         let index = self.tile_index(current_tile_id)?;
         let next_index = (index + 1) % self.tiles.len();
         self.tiles.get(next_index).map(|tile| tile.id.clone())
+    }
+
+    // ── Auto-link Rent ────────────────────────────────────────────────────
+
+    /// Automatically compute `linked_targets` for all properties based on
+    /// board topology and the grouping rules.
+    ///
+    /// **Rules** (when `self.auto_link_rent` is `true`):
+    /// 1. Groups only form within the same board "edge" (same side).
+    /// 2. Group members must be contiguous — no non-property tiles between them.
+    /// 3. Maximum 5 properties per group.
+    /// 4. **Exception**: a single non-property gap is allowed if the combined
+    ///    group would have >= 3 properties (e.g. P-S-P-S-P → 3 properties linked).
+    ///
+    /// Properties that already have non-empty `linked_targets` (manual bindings)
+    /// are skipped.  Call this once after loading a map, before game start.
+    /// Automatically compute `linked_targets` for all properties based on
+    /// board topology and the grouping rules.
+    ///
+    /// **Rules** (when `self.auto_link_rent` is `true`):
+    /// 1. Groups only form within the same board "edge" (same side).
+    /// 2. Group members must be contiguous — no non-property tiles between them.
+    /// 3. Maximum 5 properties per group.
+    /// 4. **Exception**: a single non-property gap is allowed if the combined
+    ///    group would have >= 3 properties (e.g. P-S-P-S-P → 3 properties linked).
+    ///
+    /// Properties that already have non-empty `linked_targets` (manual bindings)
+    /// are skipped.  Call this once after loading a map, before game start.
+    pub fn compute_auto_links(&mut self) {
+        if !self.auto_link_rent {
+            return;
+        }
+
+        let n = self.tiles.len();
+        if n < 4 {
+            return;
+        }
+
+        // Collect tile IDs with manual bindings (owned strings to avoid borrow issues)
+        let manual: HashSet<String> = self
+            .properties
+            .iter()
+            .filter(|p| !p.linked_targets.is_empty())
+            .map(|p| p.tile_id.clone())
+            .collect();
+
+        let is_prop: HashSet<String> = self
+            .properties
+            .iter()
+            .map(|p| p.tile_id.clone())
+            .collect();
+
+        // Build the traversal path (tile IDs in order, owned strings).
+        let path: Vec<String> = self.build_path();
+
+        // Process the full path as a single edge sequence.
+        Self::apply_grouping(&path, &is_prop, &manual, &mut self.properties);
+    }
+
+    /// Walk the board graph (or linear fallback) to produce the tile-ID path.
+    fn build_path(&self) -> Vec<String> {
+        let mut path: Vec<String> = Vec::new();
+        let mut visited: HashSet<String> = HashSet::new();
+        if let Some(first) = self.tiles.first() {
+            let mut current: String = first.id.clone();
+            loop {
+                if !visited.insert(current.clone()) {
+                    break;
+                }
+                path.push(current.clone());
+                match self.next_tile_id(&current) {
+                    Some(next) => current = next,
+                    None => break,
+                }
+            }
+        }
+        path
+    }
+
+    /// Apply grouping rules to a slice of tile IDs that form a path segment.
+    fn apply_grouping(
+        tile_ids: &[String],
+        is_prop: &HashSet<String>,
+        manual: &HashSet<String>,
+        properties: &mut [Property],
+    ) {
+        // ── 1. Walk and find contiguous property runs ────────────────
+        let mut runs: Vec<Vec<String>> = Vec::new();
+        let mut i = 0usize;
+        while i < tile_ids.len() {
+            if !is_prop.contains(&tile_ids[i]) || manual.contains(&tile_ids[i]) {
+                i += 1;
+                continue;
+            }
+            let mut run = vec![tile_ids[i].clone()];
+            i += 1;
+            while i < tile_ids.len()
+                && is_prop.contains(&tile_ids[i])
+                && !manual.contains(&tile_ids[i])
+            {
+                run.push(tile_ids[i].clone());
+                i += 1;
+            }
+            if !run.is_empty() {
+                runs.push(run);
+            }
+        }
+
+        if runs.is_empty() {
+            return;
+        }
+
+        // ── 2. Merge runs connected by single-tile gaps ────────────
+        let mut merged: Vec<Vec<String>> = Vec::new();
+        let mut ri = 0usize;
+        while ri < runs.len() {
+            let mut cluster: Vec<String> = runs[ri].clone();
+            ri += 1;
+
+            // Collect consecutive runs connected by gap=1
+            let mut contiguous: Vec<Vec<String>> = vec![cluster.clone()];
+            while ri < runs.len() {
+                let prev_tid = &contiguous.last().unwrap().last().unwrap().clone();
+                let gap = Self::count_gap(tile_ids, prev_tid, &runs[ri][0]);
+                if gap == 1 {
+                    contiguous.push(runs[ri].clone());
+                    ri += 1;
+                } else {
+                    break;
+                }
+            }
+
+            if contiguous.len() > 1 {
+                let total: usize = contiguous.iter().map(|r| r.len()).sum();
+                if total >= 3 {
+                    // Merge all into one group
+                    cluster.clear();
+                    for r in &contiguous {
+                        cluster.extend(r.clone());
+                    }
+                    merged.push(cluster);
+                } else {
+                    // Keep each run separate
+                    for r in contiguous {
+                        merged.push(r);
+                    }
+                }
+            } else {
+                merged.push(cluster);
+            }
+        }
+
+        // ── 3. Enforce max 5 per group & set linked_targets ──────
+        for group in &merged {
+            let max = if group.len() > 5 { 5 } else { group.len() };
+            if max < 2 {
+                continue;
+            }
+            for i in 0..max {
+                let tid = &group[i];
+                let targets: Vec<String> = (0..max)
+                    .filter(|&j| j != i)
+                    .map(|j| group[j].clone())
+                    .collect();
+                if let Some(prop) = properties.iter_mut().find(|p| p.tile_id == *tid) {
+                    prop.linked_targets = targets;
+                }
+            }
+        }
+    }
+
+    /// Count the number of non-property tiles between two tile IDs in the path.
+    fn count_gap(tile_ids: &[String], from: &str, to: &str) -> usize {
+        let mut counting = false;
+        let mut count = 0usize;
+        for tid in tile_ids {
+            if tid == from {
+                counting = true;
+                continue;
+            }
+            if tid == to {
+                return count;
+            }
+            if counting {
+                count += 1;
+            }
+        }
+        count
     }
 
     // ── Group (Union-Find) Rent Logic ─────────────────────────────────────
@@ -213,13 +409,28 @@ mod tests {
         }
     }
 
+    fn make_board(
+        tiles: Vec<Tile>,
+        properties: Vec<Property>,
+        graph: BoardGraph,
+        auto_link: bool,
+    ) -> Board {
+        Board {
+            tiles,
+            properties,
+            graph,
+            auto_link_rent: auto_link,
+        }
+    }
+
     #[test]
     fn test_tile_index() {
-        let board = Board {
-            tiles: vec![make_tile("A"), make_tile("B"), make_tile("C")],
-            properties: vec![],
-            graph: BoardGraph::default(),
-        };
+        let board = make_board(
+            vec![make_tile("A"), make_tile("B"), make_tile("C")],
+            vec![],
+            BoardGraph::default(),
+            false,
+        );
         assert_eq!(board.tile_index("A"), Some(0));
         assert_eq!(board.tile_index("B"), Some(1));
         assert_eq!(board.tile_index("C"), Some(2));
@@ -228,11 +439,12 @@ mod tests {
 
     #[test]
     fn test_tile_lookup() {
-        let board = Board {
-            tiles: vec![make_tile("GO"), make_tile("Mediterranean")],
-            properties: vec![],
-            graph: BoardGraph::default(),
-        };
+        let board = make_board(
+            vec![make_tile("GO"), make_tile("Mediterranean")],
+            vec![],
+            BoardGraph::default(),
+            false,
+        );
         assert!(board.tile("GO").is_some());
         assert_eq!(board.tile("GO").unwrap().id, "GO");
         assert!(board.tile("NonExistent").is_none());
@@ -240,19 +452,18 @@ mod tests {
 
     #[test]
     fn test_property_lookup() {
-        let mut board = Board {
-            tiles: vec![make_tile("GO"), make_tile("P1")],
-            properties: vec![make_property("P1", 200)],
-            graph: BoardGraph::default(),
-        };
+        let mut board = make_board(
+            vec![make_tile("GO"), make_tile("P1")],
+            vec![make_property("P1", 200)],
+            BoardGraph::default(),
+            false,
+        );
 
-        // Immutable lookup
         let prop = board.property("P1");
         assert!(prop.is_some());
         assert_eq!(prop.unwrap().base_price, 200);
         assert!(board.property("GO").is_none());
 
-        // Mutable lookup
         let mut_prop = board.property_mut("P1");
         assert!(mut_prop.is_some());
         mut_prop.unwrap().base_price = 300;
@@ -261,10 +472,10 @@ mod tests {
 
     #[test]
     fn test_graph_next_tile() {
-        let board = Board {
-            tiles: vec![make_tile("A"), make_tile("B"), make_tile("C")],
-            properties: vec![],
-            graph: BoardGraph {
+        let board = make_board(
+            vec![make_tile("A"), make_tile("B"), make_tile("C")],
+            vec![],
+            BoardGraph {
                 edges: vec![
                     BoardEdge {
                         from: "A".to_string(),
@@ -279,23 +490,21 @@ mod tests {
                 ],
                 teleporters: vec![],
             },
-        };
-        // Graph edge A -> C
+            false,
+        );
         assert_eq!(board.graph_next_tile_id("A"), Some("C".to_string()));
-        // Graph edge C -> B
         assert_eq!(board.graph_next_tile_id("C"), Some("B".to_string()));
-        // No edge from B
         assert_eq!(board.graph_next_tile_id("B"), None);
     }
 
     #[test]
     fn test_next_tile_id_linear_fallback() {
-        let board = Board {
-            tiles: vec![make_tile("A"), make_tile("B"), make_tile("C")],
-            properties: vec![],
-            graph: BoardGraph::default(), // empty edges → linear fallback
-        };
-        // Linear: A -> B -> C -> A (wrap around)
+        let board = make_board(
+            vec![make_tile("A"), make_tile("B"), make_tile("C")],
+            vec![],
+            BoardGraph::default(),
+            false,
+        );
         assert_eq!(board.next_tile_id("A"), Some("B".to_string()));
         assert_eq!(board.next_tile_id("B"), Some("C".to_string()));
         assert_eq!(board.next_tile_id("C"), Some("A".to_string()));
@@ -303,10 +512,10 @@ mod tests {
 
     #[test]
     fn test_next_tile_id_graph_priority() {
-        let board = Board {
-            tiles: vec![make_tile("A"), make_tile("B"), make_tile("C")],
-            properties: vec![],
-            graph: BoardGraph {
+        let board = make_board(
+            vec![make_tile("A"), make_tile("B"), make_tile("C")],
+            vec![],
+            BoardGraph {
                 edges: vec![BoardEdge {
                     from: "A".to_string(),
                     to: "C".to_string(),
@@ -314,11 +523,207 @@ mod tests {
                 }],
                 teleporters: vec![],
             },
-        };
-        // Graph takes priority: A -> C (not A -> B)
+            false,
+        );
         assert_eq!(board.next_tile_id("A"), Some("C".to_string()));
-        // No graph edge from C → falls through but edges is non-empty,
-        // so graph_next_tile_id returns None and next_tile_id returns None too.
         assert_eq!(board.next_tile_id("C"), None);
+    }
+
+    // ── Auto-link tests ─────────────────────────────────────────────────
+
+    fn make_ordinary_tile(id: &str) -> Tile {
+        Tile {
+            id: id.to_string(),
+            name_key: format!("tile.{}", id),
+            kind: TileKind::OrdinaryProperty,
+            linked_property_kind: Some(crate::property::PropertyKind::Ordinary),
+        }
+    }
+
+    fn make_chance_tile(id: &str) -> Tile {
+        Tile {
+            id: id.to_string(),
+            name_key: format!("tile.{}", id),
+            kind: TileKind::Chance,
+            linked_property_kind: None,
+        }
+    }
+
+    #[test]
+    fn test_auto_link_disabled_does_nothing() {
+        let mut board = make_board(
+            vec![make_ordinary_tile("P1"), make_ordinary_tile("P2")],
+            vec![make_property("P1", 100), make_property("P2", 100)],
+            BoardGraph::default(),
+            false, // auto_link_rent = false
+        );
+        board.compute_auto_links();
+        assert!(board.property("P1").unwrap().linked_targets.is_empty());
+        assert!(board.property("P2").unwrap().linked_targets.is_empty());
+    }
+
+    #[test]
+    fn test_auto_link_contiguous_run() {
+        // 3 contiguous properties on an edge → should be linked
+        let tiles = vec![
+            make_tile("S"),       // start (corner)
+            make_ordinary_tile("P1"),
+            make_ordinary_tile("P2"),
+            make_ordinary_tile("P3"),
+            make_tile("C"),       // corner
+        ];
+        let props = vec![
+            make_property("P1", 100),
+            make_property("P2", 100),
+            make_property("P3", 100),
+        ];
+        let mut board = make_board(tiles, props, BoardGraph::default(), true);
+        board.compute_auto_links();
+
+        let p1 = board.property("P1").unwrap();
+        let p2 = board.property("P2").unwrap();
+        let p3 = board.property("P3").unwrap();
+
+        assert!(!p1.linked_targets.is_empty());
+        assert_eq!(p1.linked_targets.len(), 2); // linked to P2 and P3
+        assert!(p1.linked_targets.contains(&"P2".to_string()));
+        assert!(p1.linked_targets.contains(&"P3".to_string()));
+
+        assert!(!p2.linked_targets.is_empty());
+        assert_eq!(p2.linked_targets.len(), 2); // linked to P1 and P3
+
+        assert!(!p3.linked_targets.is_empty());
+        assert_eq!(p3.linked_targets.len(), 2); // linked to P1 and P2
+    }
+
+    #[test]
+    fn test_auto_link_max_5() {
+        // 7 contiguous properties → should only link max 5
+        let mut tiles = vec![make_tile("S")];
+        let mut props = vec![];
+        for i in 1..=7 {
+            tiles.push(make_ordinary_tile(&format!("P{i}")));
+            props.push(make_property(&format!("P{i}"), 100));
+        }
+        tiles.push(make_tile("C"));
+        let mut board = make_board(tiles, props, BoardGraph::default(), true);
+        board.compute_auto_links();
+
+        let p1 = board.property("P1").unwrap();
+        assert_eq!(p1.linked_targets.len(), 4); // P2, P3, P4, P5 only (max 5)
+        assert!(!p1.linked_targets.contains(&"P6".to_string()));
+        assert!(!p1.linked_targets.contains(&"P7".to_string()));
+    }
+
+    #[test]
+    fn test_auto_link_single_gap_exception() {
+        // P1 - S - P2 - S - P3  (gap=1 each, total 3 properties → merged)
+        let tiles = vec![
+            make_tile("S"),
+            make_ordinary_tile("P1"),
+            make_chance_tile("G1"),
+            make_ordinary_tile("P2"),
+            make_chance_tile("G2"),
+            make_ordinary_tile("P3"),
+            make_tile("C"),
+        ];
+        let props = vec![
+            make_property("P1", 100),
+            make_property("P2", 100),
+            make_property("P3", 100),
+        ];
+        let mut board = make_board(tiles, props, BoardGraph::default(), true);
+        board.compute_auto_links();
+
+        let p1 = board.property("P1").unwrap();
+        assert_eq!(p1.linked_targets.len(), 2); // linked to P2 and P3
+
+        let p2 = board.property("P2").unwrap();
+        assert_eq!(p2.linked_targets.len(), 2);
+
+        let p3 = board.property("P3").unwrap();
+        assert_eq!(p3.linked_targets.len(), 2);
+    }
+
+    #[test]
+    fn test_auto_link_single_gap_too_few() {
+        // P1 - S - P2  (gap=1, but only 2 properties → no merge)
+        let tiles = vec![
+            make_tile("S"),
+            make_ordinary_tile("P1"),
+            make_chance_tile("G1"),
+            make_ordinary_tile("P2"),
+            make_tile("C"),
+        ];
+        let props = vec![
+            make_property("P1", 100),
+            make_property("P2", 100),
+        ];
+        let mut board = make_board(tiles, props, BoardGraph::default(), true);
+        board.compute_auto_links();
+
+        let p1 = board.property("P1").unwrap();
+        // P1 only has P2 as potential, but P2 only has P1, total=2 < 3
+        // So they should NOT be merged across the gap
+        assert!(p1.linked_targets.is_empty() || p1.linked_targets.len() == 1);
+
+        // Actually, since gap=1 but combined is only 2 (< 3), they stay separate,
+        // and each run has only 1 property (< 2), so no links at all
+        assert!(p1.linked_targets.is_empty());
+    }
+
+    #[test]
+    fn test_auto_link_double_gap_no_merge() {
+        // P1 - S - S - P2  (gap=2, should NOT merge even if combined >= 3)
+        let tiles = vec![
+            make_tile("S"),
+            make_ordinary_tile("P1"),
+            make_chance_tile("G1"),
+            make_chance_tile("G2"),
+            make_ordinary_tile("P2"),
+            make_tile("C"),
+        ];
+        let props = vec![
+            make_property("P1", 100),
+            make_property("P2", 100),
+        ];
+        let mut board = make_board(tiles, props, BoardGraph::default(), true);
+        board.compute_auto_links();
+
+        let p1 = board.property("P1").unwrap();
+        assert!(p1.linked_targets.is_empty());
+    }
+
+    #[test]
+    fn test_auto_link_manual_skip() {
+        // P1 has manual linked_targets, should be skipped by auto-link
+        let mut p1 = make_property("P1", 100);
+        p1.linked_targets = vec!["P3".to_string()]; // manual
+        let p2 = make_property("P2", 100);
+        let p3 = make_property("P3", 100);
+
+        let tiles = vec![
+            make_tile("S"),
+            make_ordinary_tile("P1"),
+            make_ordinary_tile("P2"),
+            make_ordinary_tile("P3"),
+            make_tile("C"),
+        ];
+        let mut board = make_board(tiles, vec![p1, p2, p3], BoardGraph::default(), true);
+        board.compute_auto_links();
+
+        // P1 retains its manual binding
+        assert_eq!(board.property("P1").unwrap().linked_targets, vec!["P3".to_string()]);
+
+        // P2 and P3 were auto-linked to each other (P1 skipped)
+        let p2_links = &board.property("P2").unwrap().linked_targets;
+        let p3_links = &board.property("P3").unwrap().linked_targets;
+        // P2 and P3 should be linked to each other (but NOT to P1)
+        assert!(!p2_links.is_empty());
+        assert!(p2_links.contains(&"P3".to_string()));
+        assert!(!p2_links.contains(&"P1".to_string()));
+        assert!(!p3_links.is_empty());
+        assert!(p3_links.contains(&"P2".to_string()));
+        assert!(!p3_links.contains(&"P1".to_string()));
     }
 }

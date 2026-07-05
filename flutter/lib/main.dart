@@ -328,6 +328,7 @@ class _GameScreenState extends State<GameScreen> {
           'upgrade_level': 0,
           'owner': null,
           'is_mortgaged': false,
+          'linked_targets': <String>[],
         });
       } else if (tile['kind'] == 'ExtensionProperty') {
         properties.add({
@@ -339,8 +340,16 @@ class _GameScreenState extends State<GameScreen> {
           'upgrade_level': 0,
           'owner': null,
           'is_mortgaged': false,
+          'linked_targets': <String>[],
         });
       }
+    }
+
+    // ── Auto-link rent for the complex L‑shaped board ────────────
+    // Duplicates the Rust compute_auto_links() logic so the Flutter
+    // simulator can exercise group-rent behaviour.
+    if (_useComplexBoard) {
+      _computeAutoLinks(tileSource, properties);
     }
 
     return {
@@ -358,7 +367,93 @@ class _GameScreenState extends State<GameScreen> {
       'stock_market': null,
       'active_auction': null,
       'consecutive_doubles': 0,
+      'group_rent_enabled': _useComplexBoard, // enable group rent for test
     };
+  }
+
+  /// Auto-link rent computation for the Flutter simulator.
+  ///
+  /// Mirrors the Rust `Board::compute_auto_links` logic.
+  /// Walks the tile source in path order, finds contiguous property runs,
+  /// applies the gap-merging rule (gap=1, total≥3), and sets linked_targets.
+  void _computeAutoLinks(
+      List<Map<String, String>> tileSource,
+      List<Map<String, dynamic>> properties) {
+    // Helper: check if a tile is a property (has a matching property entry)
+    bool isProp(int ti) =>
+        ti < tileSource.length &&
+        properties.any((p) => p['tile_id'] == tileSource[ti]['id']);
+
+    // Collect tile IDs that already have manual linked_targets
+    final manual = properties
+        .where((p) => (p['linked_targets'] as List).isNotEmpty)
+        .map((p) => p['tile_id'] as String)
+        .toSet();
+
+    // ── 1. Find contiguous property runs ────────────────────────
+    final runs = <List<String>>[];
+    int i = 0;
+    while (i < tileSource.length) {
+      final tid = tileSource[i]['id']!;
+      if (!isProp(i) || manual.contains(tid)) {
+        i++;
+        continue;
+      }
+      final run = <String>[tid];
+      i++;
+      while (i < tileSource.length) {
+        final next = tileSource[i]['id']!;
+        if (!isProp(i) || manual.contains(next)) break;
+        run.add(next);
+        i++;
+      }
+      if (run.isNotEmpty) runs.add(run);
+    }
+    if (runs.isEmpty) return;
+
+    // ── 2. Merge runs separated by single-tile gaps (rule 4) ────
+    final merged = <List<String>>[];
+    int ri = 0;
+    while (ri < runs.length) {
+      final cluster = <String>[...runs[ri]];
+      ri++;
+      while (ri < runs.length) {
+        // Count gap between last tile of cluster and first of next run
+        final lastId = cluster.last;
+        final nextId = runs[ri].first;
+        int gap = 0;
+        bool counting = false;
+        for (final t in tileSource) {
+          if (t['id'] == lastId) {
+            counting = true;
+            continue;
+          }
+          if (t['id'] == nextId) break;
+          if (counting) gap++;
+        }
+        final total = cluster.length + runs[ri].length;
+        if (gap != 1 || total < 3) break;
+        cluster.addAll(runs[ri]);
+        ri++;
+      }
+      merged.add(cluster);
+    }
+
+    // ── 3. Set linked_targets (max 5 per group) ─────────────────
+    for (final group in merged) {
+      final g = group.length > 5 ? group.sublist(0, 5) : group;
+      if (g.length < 2) continue;
+      for (final tid in g) {
+        final prop = properties.firstWhere(
+          (p) => p['tile_id'] == tid,
+          orElse: () => <String, dynamic>{},
+        );
+        if (prop.isNotEmpty) {
+          prop['linked_targets'] =
+              g.where((id) => id != tid).toList();
+        }
+      }
+    }
   }
 
   /// Build a [GameStateData] from a raw state JSON map.

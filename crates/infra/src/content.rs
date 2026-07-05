@@ -430,6 +430,7 @@ mod tests {
                 allow_stock_market: false,
                 allow_lottery: false,
                 allow_card_system: false,
+                auto_link_rent: false,
             },
         };
 
