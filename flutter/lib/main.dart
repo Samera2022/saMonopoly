@@ -159,6 +159,69 @@ class _GameScreenState extends State<GameScreen> {
     Color(0xFFFF6F00),
   ];
 
+  /// Set to `true` to use the complex L-shaped test board instead of the
+  /// classic rectangular 40-tile layout.
+  bool _useComplexBoard = true;
+
+  // ── Complex L‑shaped test board ─────────────────────────────────────────
+  //
+  // Grid layout (row, col):
+  //
+  //         C0  C1  C2  C3  C4
+  //   R0:  [11] [–] [9] [–] [–]
+  //   R1:  [12] [–] [8] [7] [–]
+  //   R2:  [13] [–] [–] [–] [–]
+  //   R3:  [14] [–] [–] [–] [–]
+  //   R4:  [15] [0] [1] [2] [3]
+  //
+  // Path: 15→0→1→2→3→4→5→6→7→8→9→10→11→12→13→14→(back to 15)
+  //
+  // Corners:
+  //   tile  4 (4,4) right→up      → _|   type  (\ → /)
+  //   tile  7 (1,4) up→left        → -|   type  (/ → \)
+  //   tile  9 (1,2) left→up        → |-   type  (\ → /)
+  //   tile 12 (0,0) left→down      → |-   type  (\ → /)
+  //   tile 15 (3,0) down→right     → |_   type  (/ → \)
+
+  /// Perimeter grid positions for the complex L‑shaped board (row, col).
+  final List<(int, int)> _complexPositions = const [
+    (4, 0), // tile 0  — Start
+    (4, 1), // tile 1
+    (4, 2), // tile 2
+    (4, 3), // tile 3
+    (4, 4), // tile 4  — corner right→up
+    (3, 4), // tile 5
+    (2, 4), // tile 6
+    (1, 4), // tile 7  — corner up→left
+    (1, 3), // tile 8
+    (1, 2), // tile 9  — corner left→up
+    (0, 2), // tile 10
+    (0, 1), // tile 11
+    (0, 0), // tile 12 — corner left→down
+    (1, 0), // tile 13
+    (2, 0), // tile 14
+    (3, 0), // tile 15 — corner down→right
+  ];
+
+  final List<Map<String, String>> _complexTiles = const [
+    {'id': 'start',     'name': 'Start',        'kind': 'Start'},
+    {'id': 'prop_1',    'name': 'Med Ave',      'kind': 'OrdinaryProperty'},
+    {'id': 'chance_1',  'name': 'Chance',       'kind': 'Chance'},
+    {'id': 'prop_2',    'name': 'Baltic Ave',   'kind': 'OrdinaryProperty'},
+    {'id': 'tax_1',     'name': 'Income Tax',   'kind': 'Bank'},
+    {'id': 'prop_3',    'name': 'Oriental Ave', 'kind': 'OrdinaryProperty'},
+    {'id': 'rr_1',      'name': 'Reading RR',   'kind': 'OrdinaryProperty'},
+    {'id': 'corner_1',  'name': '↱ Up Turn',    'kind': 'Jail'},
+    {'id': 'chance_2',  'name': 'Community',    'kind': 'Chance'},
+    {'id': 'corner_2',  'name': '↰ Left Turn',  'kind': 'CardShop'},
+    {'id': 'prop_4',    'name': 'Vermont Ave',  'kind': 'OrdinaryProperty'},
+    {'id': 'prop_5',    'name': 'Conn Ave',     'kind': 'OrdinaryProperty'},
+    {'id': 'corner_3',  'name': '↖ Top',        'kind': 'Start'},
+    {'id': 'util_1',    'name': 'Electric Co',  'kind': 'ExtensionProperty'},
+    {'id': 'prop_6',    'name': 'St Charles',   'kind': 'OrdinaryProperty'},
+    {'id': 'corner_4',  'name': '↙ Down Turn',  'kind': 'Bank'},
+  ];
+
   // Default tile set for the built-in board
   final List<Map<String, String>> _defaultTiles = const [
     {'id': 'start', 'name': 'Start', 'kind': 'Start'},
@@ -210,7 +273,8 @@ class _GameScreenState extends State<GameScreen> {
     _currentState = _buildInitialState(2);
     _gameState = _buildGameState(_currentState);
     _landedTileIdThisTurn = null;
-    _addLog('Game started with ${_gameState.numPlayers} players');
+    final mapLabel = _useComplexBoard ? 'Complex L‑board' : 'Classic';
+    _addLog('Game started ($mapLabel) with ${_gameState.numPlayers} players');
   }
 
   @override
@@ -223,7 +287,9 @@ class _GameScreenState extends State<GameScreen> {
 
   /// Build the initial GameState JSON map for [numPlayers] players.
   Map<String, dynamic> _buildInitialState(int numPlayers) {
-    final tiles = _defaultTiles
+    // Pick tile source: complex or classic
+    final tileSource = _useComplexBoard ? _complexTiles : _defaultTiles;
+    final tiles = tileSource
         .map((t) => {
               'id': t['id'],
               'name': t['name'],
@@ -251,7 +317,7 @@ class _GameScreenState extends State<GameScreen> {
 
     // Build properties from tiles that are OrdinaryProperty
     final properties = <Map<String, dynamic>>[];
-    for (final tile in _defaultTiles) {
+    for (final tile in tileSource) {
       if (tile['kind'] == 'OrdinaryProperty') {
         properties.add({
           'tile_id': tile['id'],
@@ -1028,11 +1094,12 @@ class _GameScreenState extends State<GameScreen> {
     }
 
     final boardViewModel = BoardViewModel(
-      mapName: 'Classic',
+      mapName: _useComplexBoard ? 'Complex L-Board' : 'Classic',
       tiles: tiles,
       players: _gameState.players,
       activePlayerIndex: _gameState.activePlayerIndex,
       propertyOwners: propertyOwners,
+      perimeterPositions: _useComplexBoard ? _complexPositions : null,
     );
 
     return GameStateWidget(
@@ -1068,9 +1135,12 @@ class _GameScreenState extends State<GameScreen> {
                         right: 4,
                         child: MinimapWidget(
                           viewModel: boardViewModel,
-                          gridSize: tiles.length >= 4
-                              ? ((tiles.length - 4) ~/ 4) + 2
-                              : 11,
+                          gridSize: _useComplexBoard && boardViewModel.perimeterPositions != null
+                              ? boardViewModel.perimeterPositions!
+                                  .fold< int>(0, (m, p) => p.$1 > m ? p.$1 : m) + 1
+                              : (tiles.length >= 4
+                                  ? ((tiles.length - 4) ~/ 4) + 2
+                                  : 11),
                           tileWidth: 60,
                           tileHeight: 60,
                           ownerColors: propertyOwners.map(

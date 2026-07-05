@@ -81,12 +81,20 @@ class BoardViewModel {
   /// Maps tile_id → player_id for properties that have been bought.
   final Map<String, String> propertyOwners;
 
+  /// Explicit perimeter grid positions `(row, col)` for each tile index,
+  /// in path order (clockwise).  When set, the renderer uses these instead
+  /// of computing positions from the rectangular formula.
+  ///
+  /// `null` (default) → fall back to the standard rectangular layout.
+  final List<(int, int)>? perimeterPositions;
+
   const BoardViewModel({
     required this.mapName,
     required this.tiles,
     this.players = const [],
     this.activePlayerIndex = 0,
     this.propertyOwners = const {},
+    this.perimeterPositions,
   });
 }
 
