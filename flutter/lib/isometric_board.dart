@@ -66,6 +66,68 @@ Rect isoBoardBounds(int gridSize, double tileW, double tileH) {
 }
 
 // ============================================================================
+// Edge / corner classification for text rendering
+// ============================================================================
+
+/// The two possible isometric edge directions.
+///
+/// In the diamond tile:
+/// ```
+///        (0, -hh) top
+///          /\
+///         /  \
+///   (-hw,0)  (hw,0)
+///   left     \  /  right
+///             \/
+///        (0, +hh) bottom
+/// ```
+/// - [slash] `/`  edges: left→top and right→bottom (angle = +isoA)
+/// - [backslash] `\` edges: top→right and bottom→left (angle = −isoA)
+enum IsoEdge { slash, backslash }
+
+/// Edge text-layout result — used by [_drawTileName].
+///
+/// Fields are positional for brevity:
+///   (mx, my)  — midpoint offset from tile centre
+///   angle     — rotation (radians)
+///   anchorEnd — `true` → text END at midpoint, `false` → START at midpoint
+class _EdgeTextLayout {
+  final double mx;
+  final double my;
+  final double angle;
+  final bool anchorEnd;
+
+  const _EdgeTextLayout(this.mx, this.my, this.angle, this.anchorEnd);
+}
+
+/// Determine edge text layout from the grid-movement vector `(Δrow, Δcol)`.
+///
+/// Movement       Iso edge   Layout
+/// ─────────────────────────────────────────────────
+/// ( 0, +1) right  \ forward  Left-Bottom mid, −isoA, END
+/// ( 0, −1) left   \ backward Right-Top    mid, −isoA, START
+/// (+1,  0) down   / forward  Left-Top     mid, +isoA, END
+/// (−1,  0) up     / backward Right-Bottom mid, +isoA, START
+_EdgeTextLayout _edgeLayoutForMove(int dr, int dc, double hw, double hh) {
+  final isoA = math.atan2(hh, hw);
+
+  if (dc > 0) {
+    // Moving RIGHT — \ forward
+    return _EdgeTextLayout(-hw / 2, hh / 2, -isoA, true);
+  }
+  if (dc < 0) {
+    // Moving LEFT — \ backward
+    return _EdgeTextLayout(hw / 2, -hh / 2, -isoA, false);
+  }
+  if (dr > 0) {
+    // Moving DOWN — / forward
+    return _EdgeTextLayout(-hw / 2, -hh / 2, isoA, true);
+  }
+  // Moving UP — / backward
+  return _EdgeTextLayout(hw / 2, hh / 2, isoA, false);
+}
+
+// ============================================================================
 // Isometric Board Painter (CustomPainter)
 // ============================================================================
 
@@ -77,6 +139,9 @@ class IsometricBoardPainter extends CustomPainter {
   final double tileHeight;
   final Map<String, Color> ownerColors;
 
+  /// Pre-computed edge direction for each tile index (from prev → curr move).
+  late final List<int> _tileMovements; // 0:right, 1:left, 2:down, 3:up
+
   IsometricBoardPainter({
     required this.viewModel,
     required this.camera,
@@ -84,7 +149,61 @@ class IsometricBoardPainter extends CustomPainter {
     required this.tileWidth,
     required this.tileHeight,
     required this.ownerColors,
-  });
+  }) {
+    _tileMovements = _computeTileMovements();
+  }
+
+  /// Build movement-direction codes for each tile on the perimeter.
+  ///
+  /// Returns a list parallel to [viewModel.tiles] where each element is:
+  ///   0 → right  (dc>0), 1 → left  (dc<0),
+  ///   2 → down   (dr>0), 3 → up    (dr<0).
+  List<int> _computeTileMovements() {
+    final tiles = viewModel.tiles;
+    final n = tiles.length;
+    if (n < 4) return List.filled(n, 0);
+
+    // Use explicit perimeter positions when provided; otherwise fall back
+    // to the standard rectangular formula.
+    final rows = List<int>.filled(n, 0);
+    final cols = List<int>.filled(n, 0);
+
+    final explicit = viewModel.perimeterPositions;
+    if (explicit != null && explicit.length >= n) {
+      for (var i = 0; i < n; i++) {
+        rows[i] = explicit[i].$1;
+        cols[i] = explicit[i].$2;
+      }
+    } else {
+      final tilesPerSide = (n - 4) ~/ 4;
+      final gs = tilesPerSide + 2;
+      int idx = 0;
+      for (var i = 0; i < gs; i++) {
+        rows[idx] = gs - 1; cols[idx] = i; idx++;
+      }
+      for (var i = 0; i < gs - 1; i++) {
+        rows[idx] = gs - 2 - i; cols[idx] = gs - 1; idx++;
+      }
+      for (var i = 0; i < gs - 1; i++) {
+        rows[idx] = 0; cols[idx] = gs - 2 - i; idx++;
+      }
+      for (var i = 0; i < gs - 2; i++) {
+        rows[idx] = 1 + i; cols[idx] = 0; idx++;
+      }
+    }
+
+    final moves = List<int>.filled(n, 0);
+    for (var i = 0; i < n; i++) {
+      final prevI = (i - 1 + n) % n;
+      final dr = rows[i] - rows[prevI];
+      final dc = cols[i] - cols[prevI];
+      if (dc > 0)       moves[i] = 0; // right
+      else if (dc < 0)  moves[i] = 1; // left
+      else if (dr > 0)  moves[i] = 2; // down
+      else              moves[i] = 3; // up
+    }
+    return moves;
+  }
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -102,30 +221,23 @@ class IsometricBoardPainter extends CustomPainter {
       return;
     }
 
-    // Compute tile-to-grid position mapping
-    //
-    // The board perimeter has 4*(gridSize-1) cells.  We allocate:
-    //   bottom: gridSize cols (includes both BL & BR corners)
-    //   right:  gridSize-1 rows (excludes BR corner already placed)
-    //   top:    gridSize-1 cols (excludes TR corner already placed)
-    //   left:   gridSize-2 rows (excludes TL & BL corners already placed)
-    final positions = <int, int>{}; // tileIdx → gridIndex (r*gSize + c)
-    int tileIdx = 0;
-    for (var i = 0; i < gridSize; i++) {
-      positions[tileIdx] = (gridSize - 1) * gridSize + i;
-      tileIdx++;
-    }
-    for (var i = 0; i < gridSize - 1; i++) {
-      positions[tileIdx] = (gridSize - 2 - i) * gridSize + (gridSize - 1);
-      tileIdx++;
-    }
-    for (var i = 0; i < gridSize - 1; i++) {
-      positions[tileIdx] = 0 * gridSize + (gridSize - 2 - i);
-      tileIdx++;
-    }
-    for (var i = 0; i < gridSize - 2; i++) {
-      positions[tileIdx] = (1 + i) * gridSize + 0;
-      tileIdx++;
+    // ── Resolve perimeter positions (explicit or computed) ──────────────
+    final n = tiles.length;
+    final rows = List<int>.filled(n, 0);
+    final cols = List<int>.filled(n, 0);
+
+    final explicit = viewModel.perimeterPositions;
+    if (explicit != null && explicit.length >= n) {
+      for (var i = 0; i < n; i++) {
+        rows[i] = explicit[i].$1;
+        cols[i] = explicit[i].$2;
+      }
+    } else {
+      for (var i = 0; i < n; i++) {
+        final pos = _computeRectPos(i, n, gridSize);
+        rows[i] = pos.$1;
+        cols[i] = pos.$2;
+      }
     }
 
     // Pre-compute players on each tile
@@ -141,27 +253,17 @@ class IsometricBoardPainter extends CustomPainter {
     // Draw tiles from back to front (painter's algorithm: sort by isoY)
     final tileIndices = List.generate(tiles.length, (i) => i);
     tileIndices.sort((a, b) {
-      final posA = positions[a] ?? 0;
-      final posB = positions[b] ?? 0;
-      final rowA = posA ~/ gridSize;
-      final colA = posA % gridSize;
-      final rowB = posB ~/ gridSize;
-      final colB = posB % gridSize;
       // Sort by isoY ascending (paint further tiles first)
-      return (rowA + colA).compareTo(rowB + colB);
+      return (rows[a] + cols[a]).compareTo(rows[b] + cols[b]);
     });
 
     for (final ti in tileIndices) {
       if (ti >= tiles.length) continue;
-      final pos = positions[ti];
-      if (pos == null) continue;
-      final row = pos ~/ gridSize;
-      final col = pos % gridSize;
       final tile = tiles[ti];
+      final center = gridToIso(rows[ti], cols[ti], tileWidth, tileHeight);
       final players = playersOnTile[ti] ?? [];
       final ownerColor = ownerColors[tile.id];
 
-      final center = gridToIso(row, col, tileWidth, tileHeight);
       _drawTile(canvas, tile, center, ownerColor);
       _drawPlayers(canvas, players, center);
     }
@@ -169,16 +271,40 @@ class IsometricBoardPainter extends CustomPainter {
     // Draw tile texts on top (front-most) — along inner edges
     for (final ti in tileIndices) {
       if (ti >= tiles.length) continue;
-      final pos = positions[ti];
-      if (pos == null) continue;
-      final row = pos ~/ gridSize;
-      final col = pos % gridSize;
       final tile = tiles[ti];
-      final center = gridToIso(row, col, tileWidth, tileHeight);
-      _drawTileName(canvas, tile, center, row, col, gridSize);
+      final center = gridToIso(rows[ti], cols[ti], tileWidth, tileHeight);
+      _drawTileName(canvas, tile, center, ti);
     }
 
     canvas.restore();
+  }
+
+  /// Rectangular-formula position for tile index [i] (fallback).
+  (int, int) _computeRectPos(int i, int n, int gs) {
+    final tps = (n - 4) ~/ 4.ceil();
+    final g = tps + 2;
+    int idx = 0;
+    // bottom
+    for (var r = 0; r < g; r++) {
+      if (idx == i) return (g - 1, r);
+      idx++;
+    }
+    // right
+    for (var r = 0; r < g - 1; r++) {
+      if (idx == i) return (g - 2 - r, g - 1);
+      idx++;
+    }
+    // top
+    for (var c = 0; c < g - 1; c++) {
+      if (idx == i) return (0, g - 2 - c);
+      idx++;
+    }
+    // left
+    for (var r = 0; r < g - 2; r++) {
+      if (idx == i) return (1 + r, 0);
+      idx++;
+    }
+    return (0, 0);
   }
 
   void _drawTile(Canvas canvas, BoardTileViewModel tile, Offset center, Color? ownerColor) {
@@ -236,8 +362,7 @@ class IsometricBoardPainter extends CustomPainter {
     }
   }
 
-  void _drawTileName(Canvas canvas, BoardTileViewModel tile, Offset center,
-      int row, int col, int gs) {
+  void _drawTileName(Canvas canvas, BoardTileViewModel tile, Offset center, int tileIndex) {
     final fontSize = math.max(tileWidth * camera.zoom * 0.1, 9.0);
     final name = _displayName(tile);
     if (name.isEmpty) return;
@@ -260,42 +385,33 @@ class IsometricBoardPainter extends CustomPainter {
 
     final hw = tileWidth / 2;
     final hh = tileHeight / 4;
-    final isoA = math.atan2(hh, hw); // ~27°
 
-    // LEFT side: (0, -hh/2), isoA, END at midpoint  ← CONFIRMED
-    // BOTTOM: (-hw/2, hh/2), isoA, END at midpoint
-    // RIGHT: (hw/2, hh/2), -isoA, END at midpoint
-    // TOP: (0, -hh), -isoA, START at vertex
+    // 1. Determine movement direction for this tile (from prev → curr).
+    final moveCode = tileIndex < _tileMovements.length
+        ? _tileMovements[tileIndex]
+        : 0;
+    // 0:right, 1:left, 2:down, 3:up
+    final dr = moveCode == 2 ? 1 : (moveCode == 3 ? -1 : 0);
+    final dc = moveCode == 0 ? 1 : (moveCode == 1 ? -1 : 0);
 
-    if (col == 0) {
-      // LEFT — isoA END at LT midpoint (-hw/2, -hh/2)
-      canvas.save();
-      canvas.translate(center.dx - hw / 2, center.dy - hh / 2);
-      canvas.rotate(isoA);
+    // 2. Look up text layout from the movement direction.
+    final layout = _edgeLayoutForMove(dr, dc, hw, hh);
+
+    // 3. Render text using the resolved layout.
+    canvas.save();
+    canvas.translate(
+      center.dx + layout.mx,
+      center.dy + layout.my,
+    );
+    canvas.rotate(layout.angle);
+    if (layout.anchorEnd) {
+      // END alignment: text ends at the midpoint
       tp.paint(canvas, Offset(-tp.width, -tp.height / 2));
-      canvas.restore();
-    } else if (row == gs - 1) {
-      // BOTTOM — text END at outer edge midpoint (-hw/2, hh/2)
-      canvas.save();
-      canvas.translate(center.dx - hw / 2, center.dy + hh / 2);
-      canvas.rotate(-isoA);
-      tp.paint(canvas, Offset(-tp.width, -tp.height / 2));
-      canvas.restore();
-    } else if (col == gs - 1) {
-      // RIGHT — text STARTS at outer edge midpoint (hw/2, hh/2)
-      canvas.save();
-      canvas.translate(center.dx + hw / 2, center.dy + hh / 2);
-      canvas.rotate(isoA);
-      tp.paint(canvas, Offset(0, -tp.height / 2));
-      canvas.restore();
     } else {
-      // TOP — text STARTS at outer edge midpoint (hw/2, -hh/2)
-      canvas.save();
-      canvas.translate(center.dx + hw / 2, center.dy - hh / 2);
-      canvas.rotate(-isoA);
+      // START alignment: text starts at the midpoint
       tp.paint(canvas, Offset(0, -tp.height / 2));
-      canvas.restore();
     }
+    canvas.restore();
   }
 
   void _drawPlayers(Canvas canvas, List<PlayerTokenViewModel> players, Offset center) {
@@ -339,8 +455,83 @@ class IsometricBoardPainter extends CustomPainter {
     return name;
   }
 
+  /// Hit-test a screen-space [point] against the board tiles.
+  /// Returns the tile index if the point falls inside a tile's diamond, or
+  /// `null` if it misses every tile.
+  int? hitTestTile(Offset point, Size canvasSize) {
+    final n = viewModel.tiles.length;
+    if (n == 0) return null;
+
+    // ── 1. Inverse camera transform ──────────────────────────────────
+    // In Flutter's Canvas the LAST transform applied is FIRST:
+    //   M = translate(w/2 - ox, h/2 - oy) × scale(z)
+    //
+    // So a canvas point (cx, cy) → screen (sx, sy):
+    //   sx = cx * z + (w/2 - ox)
+    //   sy = cy * z + (h/2 - oy)
+    //
+    // Inverse: given screen (px, py), solve for canvas (cx, cy):
+    //   cx = (px - w/2 + ox) / z
+    //   cy = (py - h/2 + oy) / z
+    final cx = (point.dx - canvasSize.width / 2 + camera.offsetX) / camera.zoom;
+    final cy = (point.dy - canvasSize.height / 2 + camera.offsetY) / camera.zoom;
+
+    // ── 2. Resolve perimeter positions ───────────────────────────────
+    final rows = List<int>.filled(n, 0);
+    final cols = List<int>.filled(n, 0);
+    final explicit = viewModel.perimeterPositions;
+    if (explicit != null && explicit.length >= n) {
+      for (var i = 0; i < n; i++) {
+        rows[i] = explicit[i].$1;
+        cols[i] = explicit[i].$2;
+      }
+    } else {
+      for (var i = 0; i < n; i++) {
+        final pos = _computeRectPos(i, n, gridSize);
+        rows[i] = pos.$1;
+        cols[i] = pos.$2;
+      }
+    }
+
+    // ── 3. Test each tile's diamond ──────────────────────────────────
+    final hw = tileWidth / 2;
+    final hh = tileHeight / 4;
+
+    // Sort by isoY descending so that front tiles are tested first
+    final indices = List.generate(n, (i) => i);
+    indices.sort((a, b) => (rows[b] + cols[b]).compareTo(rows[a] + cols[a]));
+
+    for (final ti in indices) {
+      final center = gridToIso(rows[ti], cols[ti], tileWidth, tileHeight);
+      // Point-in-diamond test: |dx|/hw + |dy|/hh <= 1
+      final dx = (cx - center.dx).abs();
+      final dy = (cy - center.dy).abs();
+      if (dx / hw + dy / hh <= 1.0) {
+        return ti;
+      }
+    }
+    return null;
+  }
+
   @override
   bool shouldRepaint(covariant IsometricBoardPainter oldDelegate) => true;
+}
+
+// ============================================================================
+// Minimal data class for tile-tap results
+// ============================================================================
+
+/// Lightweight result of a tile tap, passed up to the game screen.
+class TileTapResult {
+  final int tileIndex;
+  final String tileId;
+  final String kind;
+
+  const TileTapResult({
+    required this.tileIndex,
+    required this.tileId,
+    required this.kind,
+  });
 }
 
 // ============================================================================
@@ -367,53 +558,61 @@ class MinimapPainter extends CustomPainter {
     final tiles = viewModel.tiles;
     if (tiles.isEmpty) return;
 
-    // Use 0.9 to make the map slightly smaller (was 0.8).
-    final scale = math.min(
-      size.width / (gridSize * tileWidth * 0.9),
-      size.height / (gridSize * tileHeight * 0.9),
-    );
-
     final hw = tileWidth / 2;
     final hh = tileHeight / 4;
 
-    canvas.save();
-    // Shift up to center, but multiply by 0.85 to leave it slightly low.
-    canvas.translate(
-      size.width / 2,
-      size.height / 2 - (gridSize - 1) * hh * scale * 0.85,
+    // Resolve perimeter positions (explicit or rectangular)
+    final n = tiles.length;
+    final rows = List<int>.filled(n, 0);
+    final cols = List<int>.filled(n, 0);
+
+    final explicit = viewModel.perimeterPositions;
+    if (explicit != null && explicit.length >= n) {
+      for (var i = 0; i < n; i++) {
+        rows[i] = explicit[i].$1;
+        cols[i] = explicit[i].$2;
+      }
+    } else {
+      int idx = 0;
+      for (var i = 0; i < gridSize; i++) {
+        if (idx < n) { rows[idx] = gridSize - 1; cols[idx] = i; idx++; }
+      }
+      for (var i = 0; i < gridSize - 1; i++) {
+        if (idx < n) { rows[idx] = gridSize - 2 - i; cols[idx] = gridSize - 1; idx++; }
+      }
+      for (var i = 0; i < gridSize - 1; i++) {
+        if (idx < n) { rows[idx] = 0; cols[idx] = gridSize - 2 - i; idx++; }
+      }
+      for (var i = 0; i < gridSize - 2; i++) {
+        if (idx < n) { rows[idx] = 1 + i; cols[idx] = 0; idx++; }
+      }
+    }
+
+    // Compute scale and centre using the bounding box of all positions
+    double minR = rows[0].toDouble(), maxR = rows[0].toDouble();
+    double minC = cols[0].toDouble(), maxC = cols[0].toDouble();
+    for (var i = 1; i < n; i++) {
+      if (rows[i] < minR) minR = rows[i].toDouble();
+      if (rows[i] > maxR) maxR = rows[i].toDouble();
+      if (cols[i] < minC) minC = cols[i].toDouble();
+      if (cols[i] > maxC) maxC = cols[i].toDouble();
+    }
+    final spanR = maxR - minR + 1;
+    final spanC = maxC - minC + 1;
+    final scale = math.min(
+      size.width / (spanC * tileWidth * 1.1),
+      size.height / (spanR * tileHeight * 1.1),
     );
+
+    canvas.save();
+    canvas.translate(size.width / 2, size.height / 2);
     canvas.scale(scale);
 
-    final positions = <int, int>{};
-    int tileIdx = 0;
-    for (var i = 0; i < gridSize; i++) {
-      positions[tileIdx] = (gridSize - 1) * gridSize + i;
-      tileIdx++;
-    }
-    for (var i = 0; i < gridSize - 1; i++) {
-      positions[tileIdx] = (gridSize - 2 - i) * gridSize + (gridSize - 1);
-      tileIdx++;
-    }
-    for (var i = 0; i < gridSize - 1; i++) {
-      positions[tileIdx] = 0 * gridSize + (gridSize - 2 - i);
-      tileIdx++;
-    }
-    for (var i = 0; i < gridSize - 2; i++) {
-      positions[tileIdx] = (1 + i) * gridSize + 0;
-      tileIdx++;
-    }
-
-    for (final entry in positions.entries) {
-      final ti = entry.key;
-      if (ti >= tiles.length) continue;
-      final pos = entry.value;
-      final row = pos ~/ gridSize;
-      final col = pos % gridSize;
-      final tile = tiles[ti];
-      final center = gridToIso(row, col, tileWidth, tileHeight);
+    for (var i = 0; i < n; i++) {
+      final tile = tiles[i];
+      final center = gridToIso(rows[i], cols[i], tileWidth, tileHeight);
       final ownerColor = ownerColors[tile.id];
 
-      // Draw tile as proper isometric diamond
       final path = Path()
         ..moveTo(center.dx, center.dy - hh)
         ..lineTo(center.dx + hw, center.dy)
@@ -426,8 +625,6 @@ class MinimapPainter extends CustomPainter {
       } else if (tile.kind == 'OrdinaryProperty' ||
                  tile.kind == 'SpecialProperty' ||
                  tile.kind == 'ExtensionProperty') {
-        // Unowned property tiles → grey, so the tile's own colour
-        // is never mistaken for an owner indicator on the minimap.
         canvas.drawPath(path, Paint()..color = Colors.grey.withOpacity(0.35));
       } else {
         canvas.drawPath(path, Paint()..color = tile.color.withOpacity(0.3));
@@ -451,8 +648,13 @@ class MinimapPainter extends CustomPainter {
 
 class IsometricBoardWidget extends StatefulWidget {
   final BoardViewModel viewModel;
+  final ValueChanged<TileTapResult>? onTileTap;
 
-  const IsometricBoardWidget({super.key, required this.viewModel});
+  const IsometricBoardWidget({
+    super.key,
+    required this.viewModel,
+    this.onTileTap,
+  });
 
   @override
   State<IsometricBoardWidget> createState() => _IsometricBoardWidgetState();
@@ -501,8 +703,20 @@ class _IsometricBoardWidgetState extends State<IsometricBoardWidget> {
     if (numTiles < 4) {
       return const Center(child: Text('Not enough tiles'));
     }
-    final tilesPerSide = (numTiles - 4) ~/ 4;
-    _gridSize = tilesPerSide + 2;
+
+    // Grid size: from explicit positions or rectangular formula.
+    final explicit = widget.viewModel.perimeterPositions;
+    if (explicit != null && explicit.length >= numTiles) {
+      int maxR = 0, maxC = 0;
+      for (final p in explicit) {
+        if (p.$1 > maxR) maxR = p.$1;
+        if (p.$2 > maxC) maxC = p.$2;
+      }
+      _gridSize = (maxR > maxC ? maxR : maxC) + 1;
+    } else {
+      final tilesPerSide = (numTiles - 4) ~/ 4;
+      _gridSize = tilesPerSide + 2;
+    }
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -510,8 +724,35 @@ class _IsometricBoardWidgetState extends State<IsometricBoardWidget> {
         _tileWidth = _boardSize / _gridSize;
         _tileHeight = _boardSize / _gridSize;
 
+        // We need the CustomPaint's size for hit-testing.
+        // Use a GlobalKey on the RepaintBoundary to get its render-box.
         return ClipRect(
           child: GestureDetector(
+            onTapUp: (details) {
+              final renderObj =
+                  _paintKey.currentContext?.findRenderObject();
+              if (renderObj is RenderBox) {
+                final size = renderObj.size;
+                // Ask the painter to hit-test
+                final painter = IsometricBoardPainter(
+                  viewModel: widget.viewModel,
+                  camera: _camera,
+                  gridSize: _gridSize,
+                  tileWidth: _tileWidth,
+                  tileHeight: _tileHeight,
+                  ownerColors: _ownerColors,
+                );
+                final ti = painter.hitTestTile(details.localPosition, size);
+                if (ti != null && widget.onTileTap != null) {
+                  final tile = widget.viewModel.tiles[ti];
+                  widget.onTileTap!(TileTapResult(
+                    tileIndex: ti,
+                    tileId: tile.id,
+                    kind: tile.kind,
+                  ));
+                }
+              }
+            },
             onPanStart: (details) {
               _lastDragPos = details.localPosition;
             },

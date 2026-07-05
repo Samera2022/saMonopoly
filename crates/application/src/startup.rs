@@ -13,6 +13,7 @@ impl GameBootstrap {
                 tiles: vec![],
                 properties: vec![],
                 graph: Default::default(),
+                auto_link_rent: false,
             },
             players: vec![Player {
                 id: "player_1".to_string(),

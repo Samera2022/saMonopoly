@@ -37,6 +37,11 @@ pub struct MapRules {
     pub allow_stock_market: bool,
     pub allow_lottery: bool,
     pub allow_card_system: bool,
+    /// When `true`, the engine will automatically compute linked-target
+    /// groups for properties on the same board edge.
+    /// Properties with manual `linked_targets` are skipped.
+    #[serde(default)]
+    pub auto_link_rent: bool,
 }
 
 pub trait MapValidator {

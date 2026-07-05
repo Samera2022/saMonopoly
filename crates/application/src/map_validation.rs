@@ -193,6 +193,7 @@ mod tests {
             tiles,
             properties,
             graph,
+            auto_link_rent: false,
         }
     }
 

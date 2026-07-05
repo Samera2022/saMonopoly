@@ -74,6 +74,7 @@ fn test_board() -> sa_monopoly_domain::Board {
             make_property("prop_c", 300),
         ],
         graph: BoardGraph::default(),
+        auto_link_rent: false,
     }
 }
 
