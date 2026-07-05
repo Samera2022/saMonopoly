@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import 'board_view.dart';
+import 'home_screen.dart';
 import 'bridge_client.dart';
 import 'card_inventory_dialog.dart';
 import 'card_shop_dialog.dart';
@@ -100,7 +101,7 @@ class SaMonopolyApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.green),
         useMaterial3: true,
       ),
-      home: const GameScreen(),
+      home: const HomeScreen(),
     );
   }
 }
@@ -110,7 +111,16 @@ class SaMonopolyApp extends StatelessWidget {
 // ============================================================================
 
 class GameScreen extends StatefulWidget {
-  const GameScreen({super.key});
+  final int? initialPlayerCount;
+  final List<String>? playerNames;
+  final List<bool>? aiFlags;
+
+  const GameScreen({
+    super.key,
+    this.initialPlayerCount,
+    this.playerNames,
+    this.aiFlags,
+  });
 
   @override
   State<GameScreen> createState() => _GameScreenState();
@@ -283,9 +293,28 @@ class _GameScreenState extends State<GameScreen> {
   void initState() {
     super.initState();
     _pack = sampleClassicPack();
-    _currentState = _buildInitialState(2);
+
+    // Determine player count from parameters or default to 2
+    final playerCount = widget.initialPlayerCount ?? 2;
+    _currentState = _buildInitialState(playerCount);
     _gameState = _buildGameState(_currentState);
     _landedTileIdThisTurn = null;
+
+    // Apply custom player names and AI flags if provided
+    if (widget.playerNames != null || widget.aiFlags != null) {
+      final players = _currentState['players'] as List<Map<String, dynamic>>;
+      for (var i = 0; i < players.length && i < playerCount; i++) {
+        if (widget.playerNames != null && i < widget.playerNames!.length) {
+          players[i]['name'] = widget.playerNames![i];
+        }
+        if (widget.aiFlags != null && i < widget.aiFlags!.length) {
+          players[i]['is_ai'] = widget.aiFlags![i];
+        }
+      }
+      _currentState['players'] = players;
+      _gameState = _buildGameState(_currentState, lastEvent: 'Game initialized');
+    }
+
     final mapLabel = _useComplexBoard ? 'Complex L‑board' : 'Classic';
     _addLog('Game started ($mapLabel) with ${_gameState.numPlayers} players');
   }
