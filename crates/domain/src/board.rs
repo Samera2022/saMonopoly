@@ -142,8 +142,87 @@ impl Board {
         // Build the traversal path (tile IDs in order, owned strings).
         let path: Vec<String> = self.build_path();
 
-        // Process the full path as a single edge sequence.
-        Self::apply_grouping(&path, &is_prop, &manual, &mut self.properties);
+        // Split path into edges (direction segments) and process each independently.
+        // Rule 1: group rent only happens within the same board edge.
+        let edges: Vec<Vec<usize>> = if self.graph.edges.is_empty() {
+            Self::linear_edges(n)
+        } else {
+            self.graph_edges()
+        };
+
+        for edge_indices in &edges {
+            let edge_path: Vec<String> = edge_indices
+                .iter()
+                .filter_map(|&idx| path.get(idx))
+                .cloned()
+                .collect();
+            if !edge_path.is_empty() {
+                Self::apply_grouping(&edge_path, &is_prop, &manual, &mut self.properties);
+            }
+        }
+    }
+
+    /// Split the linear tile sequence into 4 rectangular sides.
+    ///
+    /// Only valid when `n` matches the rectangular formula `4(g-1)`.
+    /// For non‑rectangular layouts the whole path is returned as one edge.
+    fn linear_edges(n: usize) -> Vec<Vec<usize>> {
+        if n < 4 {
+            return vec![(0..n).collect()];
+        }
+        // Check if n fits the rectangular formula: n == 4(g-1) for integer g
+        if (n + 4) % 4 != 0 {
+            return vec![(0..n).collect()];
+        }
+        let g = (n + 4) / 4; // grid size
+        // Verify g >= 2 (minimum for a rectangle)
+        if g < 2 {
+            return vec![(0..n).collect()];
+        }
+        vec![
+            (0..g).collect(),                         // bottom: g tiles
+            (g..(2 * g - 1)).collect(),                // right:  g-1 tiles
+            ((2 * g - 2)..(3 * g - 3)).collect(),      // top:    g-1 tiles
+            ((3 * g - 3)..(4 * g - 5)).collect(),      // left:   g-2 tiles
+        ]
+    }
+
+    /// Walk the graph to find edge segments (paths between degree-≠2 nodes).
+    fn graph_edges(&self) -> Vec<Vec<usize>> {
+        if self.tiles.is_empty() { return vec![]; }
+        let tile_idx: std::collections::HashMap<&str, usize> = self
+            .tiles.iter().enumerate().map(|(i, t)| (t.id.as_str(), i)).collect();
+        let mut path: Vec<usize> = Vec::new();
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if let Some(first) = self.tiles.first() {
+            let mut current = first.id.clone();
+            loop {
+                if !visited.insert(current.clone()) { break; }
+                if let Some(&idx) = tile_idx.get(current.as_str()) { path.push(idx); }
+                match self.next_tile_id(&current) {
+                    Some(next) => current = next,
+                    None => break,
+                }
+            }
+        }
+        // Build undirected adjacency for degree detection
+        let mut adj: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
+        for edge in &self.graph.edges {
+            adj.entry(edge.from.as_str()).or_default().push(&edge.to);
+            adj.entry(edge.to.as_str()).or_default().push(&edge.from);
+        }
+        let mut edges: Vec<Vec<usize>> = Vec::new();
+        let mut current: Vec<usize> = Vec::new();
+        for &idx in &path {
+            let tid = &self.tiles[idx].id;
+            let deg = adj.get(tid.as_str()).map_or(0, |v| v.len());
+            current.push(idx);
+            if deg != 2 {
+                edges.push(std::mem::take(&mut current));
+            }
+        }
+        if !current.is_empty() { edges.push(current); }
+        edges
     }
 
     /// Walk the board graph (or linear fallback) to produce the tile-ID path.

@@ -463,9 +463,18 @@ class IsometricBoardPainter extends CustomPainter {
     if (n == 0) return null;
 
     // ── 1. Inverse camera transform ──────────────────────────────────
-    // paint() does: translate(w/2 - ox, h/2 - oy); scale(zoom)
-    final cx = (point.dx - canvasSize.width / 2) / camera.zoom + camera.offsetX;
-    final cy = (point.dy - canvasSize.height / 2) / camera.zoom + camera.offsetY;
+    // In Flutter's Canvas the LAST transform applied is FIRST:
+    //   M = translate(w/2 - ox, h/2 - oy) × scale(z)
+    //
+    // So a canvas point (cx, cy) → screen (sx, sy):
+    //   sx = cx * z + (w/2 - ox)
+    //   sy = cy * z + (h/2 - oy)
+    //
+    // Inverse: given screen (px, py), solve for canvas (cx, cy):
+    //   cx = (px - w/2 + ox) / z
+    //   cy = (py - h/2 + oy) / z
+    final cx = (point.dx - canvasSize.width / 2 + camera.offsetX) / camera.zoom;
+    final cy = (point.dy - canvasSize.height / 2 + camera.offsetY) / camera.zoom;
 
     // ── 2. Resolve perimeter positions ───────────────────────────────
     final rows = List<int>.filled(n, 0);

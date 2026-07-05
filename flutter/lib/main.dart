@@ -346,10 +346,12 @@ class _GameScreenState extends State<GameScreen> {
     }
 
     // ── Auto-link rent for the complex L‑shaped board ────────────
-    // Duplicates the Rust compute_auto_links() logic so the Flutter
-    // simulator can exercise group-rent behaviour.
     if (_useComplexBoard) {
-      _computeAutoLinks(tileSource, properties);
+      _computeAutoLinks(
+        tileSource,
+        properties,
+        _complexPositions,
+      );
     }
 
     return {
@@ -371,86 +373,115 @@ class _GameScreenState extends State<GameScreen> {
     };
   }
 
-  /// Auto-link rent computation for the Flutter simulator.
+  /// Auto-link rent computation — split by board edges first.
   ///
-  /// Mirrors the Rust `Board::compute_auto_links` logic.
-  /// Walks the tile source in path order, finds contiguous property runs,
-  /// applies the gap-merging rule (gap=1, total≥3), and sets linked_targets.
+  /// Rule 1: groups only form within the same board edge (same direction).
+  /// We split the path at direction changes (detected via grid positions),
+  /// then process each edge independently.
   void _computeAutoLinks(
       List<Map<String, String>> tileSource,
-      List<Map<String, dynamic>> properties) {
-    // Helper: check if a tile is a property (has a matching property entry)
+      List<Map<String, dynamic>> properties,
+      List<(int, int)> positions) {
     bool isProp(int ti) =>
         ti < tileSource.length &&
         properties.any((p) => p['tile_id'] == tileSource[ti]['id']);
 
-    // Collect tile IDs that already have manual linked_targets
     final manual = properties
         .where((p) => (p['linked_targets'] as List).isNotEmpty)
         .map((p) => p['tile_id'] as String)
         .toSet();
 
-    // ── 1. Find contiguous property runs ────────────────────────
-    final runs = <List<String>>[];
-    int i = 0;
-    while (i < tileSource.length) {
-      final tid = tileSource[i]['id']!;
-      if (!isProp(i) || manual.contains(tid)) {
-        i++;
-        continue;
-      }
-      final run = <String>[tid];
-      i++;
-      while (i < tileSource.length) {
-        final next = tileSource[i]['id']!;
-        if (!isProp(i) || manual.contains(next)) break;
-        run.add(next);
-        i++;
-      }
-      if (run.isNotEmpty) runs.add(run);
-    }
-    if (runs.isEmpty) return;
+    // ── 0. Split path into edges at direction changes ──────────
+    // A direction change occurs when (Δrow, Δcol) differs between
+    // consecutive tile pairs.
+    final edges = <List<int>>[]; // each edge is a list of tile indices
+    if (positions.length < 2) return;
 
-    // ── 2. Merge runs separated by single-tile gaps (rule 4) ────
-    final merged = <List<String>>[];
-    int ri = 0;
-    while (ri < runs.length) {
-      final cluster = <String>[...runs[ri]];
-      ri++;
-      while (ri < runs.length) {
-        // Count gap between last tile of cluster and first of next run
-        final lastId = cluster.last;
-        final nextId = runs[ri].first;
-        int gap = 0;
-        bool counting = false;
-        for (final t in tileSource) {
-          if (t['id'] == lastId) {
-            counting = true;
-            continue;
-          }
-          if (t['id'] == nextId) break;
-          if (counting) gap++;
+    var currentEdge = <int>[0];
+    for (int i = 1; i < positions.length; i++) {
+      final pr = positions[i - 1].$1, pc = positions[i - 1].$2;
+      final cr = positions[i].$1, cc = positions[i].$2;
+      final dr = cr - pr, dc = cc - pc;
+
+      if (i < positions.length - 1) {
+        final nr = positions[i + 1].$1, nc = positions[i + 1].$2;
+        final ndr = nr - cr, ndc = nc - cc;
+        if (ndr != dr || ndc != dc) {
+          // Direction changes at tile i → end current edge here
+          currentEdge.add(i);
+          edges.add(List.from(currentEdge));
+          currentEdge = <int>[i];
+          continue;
         }
-        final total = cluster.length + runs[ri].length;
-        if (gap != 1 || total < 3) break;
-        cluster.addAll(runs[ri]);
-        ri++;
       }
-      merged.add(cluster);
+      currentEdge.add(i);
     }
+    if (currentEdge.isNotEmpty) edges.add(currentEdge);
 
-    // ── 3. Set linked_targets (max 5 per group) ─────────────────
-    for (final group in merged) {
-      final g = group.length > 5 ? group.sublist(0, 5) : group;
-      if (g.length < 2) continue;
-      for (final tid in g) {
-        final prop = properties.firstWhere(
-          (p) => p['tile_id'] == tid,
-          orElse: () => <String, dynamic>{},
-        );
-        if (prop.isNotEmpty) {
-          prop['linked_targets'] =
-              g.where((id) => id != tid).toList();
+    // ── 1..3. Process each edge independently ───────────────────
+    for (final edge in edges) {
+      final edgeRuns = <List<String>>[];
+
+      // Find contiguous property runs within this edge
+      int ei = 0;
+      while (ei < edge.length) {
+        final ti = edge[ei];
+        final tid = tileSource[ti]['id']!;
+        if (!isProp(ti) || manual.contains(tid)) {
+          ei++;
+          continue;
+        }
+        final run = <String>[tid];
+        ei++;
+        while (ei < edge.length) {
+          final nti = edge[ei];
+          final nid = tileSource[nti]['id']!;
+          if (!isProp(nti) || manual.contains(nid)) break;
+          run.add(nid);
+          ei++;
+        }
+        if (run.isNotEmpty) edgeRuns.add(run);
+      }
+
+      // Merge runs within this edge (gap=1, total≥3)
+      final merged = <List<String>>[];
+      int ri = 0;
+      while (ri < edgeRuns.length) {
+        final cluster = <String>[...edgeRuns[ri]];
+        ri++;
+        while (ri < edgeRuns.length) {
+          final lastId = cluster.last;
+          final nextId = edgeRuns[ri].first;
+          int gap = 0;
+          bool counting = false;
+          for (final t in tileSource) {
+            if (t['id'] == lastId) {
+              counting = true;
+              continue;
+            }
+            if (t['id'] == nextId) break;
+            if (counting) gap++;
+          }
+          final total = cluster.length + edgeRuns[ri].length;
+          if (gap != 1 || total < 3) break;
+          cluster.addAll(edgeRuns[ri]);
+          ri++;
+        }
+        merged.add(cluster);
+      }
+
+      // Set linked_targets (max 5)
+      for (final group in merged) {
+        final g = group.length > 5 ? group.sublist(0, 5) : group;
+        if (g.length < 2) continue;
+        for (final tid in g) {
+          final prop = properties.firstWhere(
+            (p) => p['tile_id'] == tid,
+            orElse: () => <String, dynamic>{},
+          );
+          if (prop.isNotEmpty) {
+            prop['linked_targets'] = g.where((id) => id != tid).toList();
+          }
         }
       }
     }
