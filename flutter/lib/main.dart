@@ -917,6 +917,211 @@ class _GameScreenState extends State<GameScreen> {
     _addLog('Player upgraded $tileId');
   }
 
+  /// Show a detailed property information dialog.
+  void _showPropertyDetailDialog(String tileId) {
+    final rawTiles = (_currentState['board'] as Map<String, dynamic>?)?
+            ['tiles'] as List<dynamic>? ??
+        [];
+    final tileData = rawTiles.cast<Map<String, dynamic>>().firstWhere(
+      (t) => t['id'] == tileId,
+      orElse: () => <String, dynamic>{},
+    );
+    if (tileData.isEmpty) return;
+
+    final tileName = (tileData['name'] as String?) ?? tileId;
+    final tileKind = (tileData['kind'] as String?) ?? 'Unknown';
+
+    final properties = (_currentState['board'] as Map<String, dynamic>?)?
+            ['properties'] as List<dynamic>? ??
+        [];
+    final propData = properties.cast<Map<String, dynamic>>().firstWhere(
+      (p) => p['tile_id'] == tileId,
+      orElse: () => <String, dynamic>{},
+    );
+    final isProperty = propData.isNotEmpty;
+
+    // Owner
+    final ownerId = isProperty ? propData['owner'] as String? : null;
+    String ownerLabel;
+    Color ownerColor;
+    if (ownerId != null) {
+      final playerIdx = int.tryParse(ownerId.replaceAll('player_', '')) ?? 0;
+      const colors = [
+        Color(0xFFD32F2F), Color(0xFF1976D2), Color(0xFF388E3C),
+        Color(0xFFFBC02D), Color(0xFF8E24AA), Color(0xFFFF6F00),
+      ];
+      ownerColor = colors[playerIdx % colors.length];
+      final players = _gameState.players;
+      ownerLabel = playerIdx < players.length
+          ? players[playerIdx].name
+          : 'Player $playerIdx';
+    } else {
+      ownerColor = Colors.grey;
+      ownerLabel = isProperty ? 'Unowned' : 'N/A';
+    }
+
+    final level =
+        isProperty ? ((propData['upgrade_level'] as num?)?.toInt() ?? 0) : 0;
+    final basePrice =
+        isProperty ? ((propData['base_price'] as num?)?.toInt() ?? 0) : 0;
+    final rentList = isProperty
+        ? (propData['rent'] as List<dynamic>?)
+                ?.map((e) => (e as num).toInt())
+                .toList() ??
+            <int>[]
+        : <int>[];
+    final baseRent = rentList.isNotEmpty ? rentList[0] : (basePrice ~/ 10);
+    final currentRent = baseRent * (1 + level) ~/ 10;
+
+    // Group rent
+    int groupRent = 0;
+    int groupCount = 1;
+    final linkedTargets = isProperty
+        ? (propData['linked_targets'] as List<dynamic>?)
+                ?.map((e) => e as String)
+                .toList() ??
+            <String>[]
+        : <String>[];
+    if (_currentState['group_rent_enabled'] == true &&
+        linkedTargets.isNotEmpty && ownerId != null) {
+      groupCount = 1;
+      for (final target in linkedTargets) {
+        final tp = properties.cast<Map<String, dynamic>>().firstWhere(
+          (p) => p['tile_id'] == target,
+          orElse: () => <String, dynamic>{},
+        );
+        if (tp.isNotEmpty && tp['owner'] == ownerId) {
+          final tl = (tp['upgrade_level'] as num?)?.toInt() ?? 0;
+          final tr = (tp['rent'] as List<dynamic>?)
+                  ?.map((e) => (e as num).toInt())
+                  .toList() ??
+              <int>[];
+          final tb = (tp['base_price'] as num?)?.toInt() ?? 0;
+          final tbr = tr.isNotEmpty ? tr[0] : (tb ~/ 10);
+          groupRent += tbr * (1 + tl) ~/ 10;
+          groupCount++;
+        }
+      }
+      groupRent += currentRent; // include this property's own rent
+    }
+
+    final upgradeCost = baseRent * (1 + level) ~/ 2;
+    final maxLevel =
+        (_currentState['max_upgrade_level'] as num?)?.toInt() ?? 3;
+    final canUpgrade = ownerId != null && level < maxLevel;
+
+    // ── Tile color chip ──────────────────────────────────────
+    Color tileColor;
+    try {
+      tileColor = BoardTileViewModel(id: tileId, name: tileName, kind: tileKind).color;
+    } catch (_) {
+      tileColor = Colors.grey;
+    }
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Row(children: [
+          Container(
+            width: 14, height: 14,
+            decoration: BoxDecoration(
+              color: tileColor,
+              shape: BoxShape.rectangle,
+              borderRadius: BorderRadius.circular(3),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(tileName,
+                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                overflow: TextOverflow.ellipsis),
+          ),
+        ]),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _detailRow('Type', tileKind),
+            const Divider(height: 10),
+            if (isProperty) ...[
+              _detailRow('Owner', ownerLabel,
+                  valueColor: ownerId != null ? ownerColor : null),
+              _detailRow('Level', level > 0 ? '$level ★' : '0 (base)'),
+              const Divider(height: 10),
+              _detailRow('Base Price', '\$$basePrice'),
+              _detailRow('Rent (current)', '\$$currentRent',
+                  valueColor: Colors.red.shade700),
+              if (groupRent > 0)
+                _detailRow('Group Rent (×$groupCount)',
+                    '\$$groupRent',
+                    valueColor: Colors.deepOrange),
+              const Divider(height: 10),
+              _detailRow('Upgrade Cost',
+                  canUpgrade ? '\$$upgradeCost' : 'Max level',
+                  valueColor:
+                      canUpgrade ? Colors.green.shade700 : Colors.grey),
+              if (linkedTargets.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                const Text('Linked group:',
+                    style: TextStyle(
+                        fontSize: 12, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 2),
+                ...linkedTargets.map((t) {
+                  final td = rawTiles.cast<Map<String, dynamic>>().firstWhere(
+                    (x) => x['id'] == t,
+                    orElse: () => <String, dynamic>{},
+                  );
+                  return Padding(
+                    padding: const EdgeInsets.only(left: 12, bottom: 1),
+                    child: Text('• ${td['name'] ?? t}',
+                        style: const TextStyle(fontSize: 12)),
+                  );
+                }),
+              ],
+            ] else ...[
+              _detailRow('Owner', 'N/A'),
+              const SizedBox(height: 4),
+              const Text('This tile is not a purchasable property.',
+                  style: TextStyle(fontSize: 12, color: Colors.grey)),
+            ],
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _detailRow(String label, String value, {Color? valueColor}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 110,
+            child: Text(label,
+                style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                    color: Colors.grey)),
+          ),
+          Expanded(
+            child: Text(value,
+                style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: valueColor ?? Colors.black87)),
+          ),
+        ],
+      ),
+    );
+  }
+
   /// Find a property definition at the given tile position.
   Map<String, dynamic>? _findPropertyAtTile(String tileId) {
     final properties =
@@ -1223,6 +1428,7 @@ class _GameScreenState extends State<GameScreen> {
                     children: [
                       IsometricBoardWidget(
                         viewModel: boardViewModel,
+                        onTileTap: (result) => _showPropertyDetailDialog(result.tileId),
                       ),
                       // Minimap overlay
                       Positioned(

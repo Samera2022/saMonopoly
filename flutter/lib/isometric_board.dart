@@ -455,8 +455,74 @@ class IsometricBoardPainter extends CustomPainter {
     return name;
   }
 
+  /// Hit-test a screen-space [point] against the board tiles.
+  /// Returns the tile index if the point falls inside a tile's diamond, or
+  /// `null` if it misses every tile.
+  int? hitTestTile(Offset point, Size canvasSize) {
+    final n = viewModel.tiles.length;
+    if (n == 0) return null;
+
+    // ── 1. Inverse camera transform ──────────────────────────────────
+    // paint() does: translate(w/2 - ox, h/2 - oy); scale(zoom)
+    final cx = (point.dx - canvasSize.width / 2) / camera.zoom + camera.offsetX;
+    final cy = (point.dy - canvasSize.height / 2) / camera.zoom + camera.offsetY;
+
+    // ── 2. Resolve perimeter positions ───────────────────────────────
+    final rows = List<int>.filled(n, 0);
+    final cols = List<int>.filled(n, 0);
+    final explicit = viewModel.perimeterPositions;
+    if (explicit != null && explicit.length >= n) {
+      for (var i = 0; i < n; i++) {
+        rows[i] = explicit[i].$1;
+        cols[i] = explicit[i].$2;
+      }
+    } else {
+      for (var i = 0; i < n; i++) {
+        final pos = _computeRectPos(i, n, gridSize);
+        rows[i] = pos.$1;
+        cols[i] = pos.$2;
+      }
+    }
+
+    // ── 3. Test each tile's diamond ──────────────────────────────────
+    final hw = tileWidth / 2;
+    final hh = tileHeight / 4;
+
+    // Sort by isoY descending so that front tiles are tested first
+    final indices = List.generate(n, (i) => i);
+    indices.sort((a, b) => (rows[b] + cols[b]).compareTo(rows[a] + cols[a]));
+
+    for (final ti in indices) {
+      final center = gridToIso(rows[ti], cols[ti], tileWidth, tileHeight);
+      // Point-in-diamond test: |dx|/hw + |dy|/hh <= 1
+      final dx = (cx - center.dx).abs();
+      final dy = (cy - center.dy).abs();
+      if (dx / hw + dy / hh <= 1.0) {
+        return ti;
+      }
+    }
+    return null;
+  }
+
   @override
   bool shouldRepaint(covariant IsometricBoardPainter oldDelegate) => true;
+}
+
+// ============================================================================
+// Minimal data class for tile-tap results
+// ============================================================================
+
+/// Lightweight result of a tile tap, passed up to the game screen.
+class TileTapResult {
+  final int tileIndex;
+  final String tileId;
+  final String kind;
+
+  const TileTapResult({
+    required this.tileIndex,
+    required this.tileId,
+    required this.kind,
+  });
 }
 
 // ============================================================================
@@ -573,8 +639,13 @@ class MinimapPainter extends CustomPainter {
 
 class IsometricBoardWidget extends StatefulWidget {
   final BoardViewModel viewModel;
+  final ValueChanged<TileTapResult>? onTileTap;
 
-  const IsometricBoardWidget({super.key, required this.viewModel});
+  const IsometricBoardWidget({
+    super.key,
+    required this.viewModel,
+    this.onTileTap,
+  });
 
   @override
   State<IsometricBoardWidget> createState() => _IsometricBoardWidgetState();
@@ -644,8 +715,35 @@ class _IsometricBoardWidgetState extends State<IsometricBoardWidget> {
         _tileWidth = _boardSize / _gridSize;
         _tileHeight = _boardSize / _gridSize;
 
+        // We need the CustomPaint's size for hit-testing.
+        // Use a GlobalKey on the RepaintBoundary to get its render-box.
         return ClipRect(
           child: GestureDetector(
+            onTapUp: (details) {
+              final renderObj =
+                  _paintKey.currentContext?.findRenderObject();
+              if (renderObj is RenderBox) {
+                final size = renderObj.size;
+                // Ask the painter to hit-test
+                final painter = IsometricBoardPainter(
+                  viewModel: widget.viewModel,
+                  camera: _camera,
+                  gridSize: _gridSize,
+                  tileWidth: _tileWidth,
+                  tileHeight: _tileHeight,
+                  ownerColors: _ownerColors,
+                );
+                final ti = painter.hitTestTile(details.localPosition, size);
+                if (ti != null && widget.onTileTap != null) {
+                  final tile = widget.viewModel.tiles[ti];
+                  widget.onTileTap!(TileTapResult(
+                    tileIndex: ti,
+                    tileId: tile.id,
+                    kind: tile.kind,
+                  ));
+                }
+              }
+            },
             onPanStart: (details) {
               _lastDragPos = details.localPosition;
             },
