@@ -1,5 +1,5 @@
 use sa_monopoly_domain::tile::SpecialTileKind;
-use sa_monopoly_domain::{CardDeckId, GameState, LotteryRuleSet};
+use sa_monopoly_domain::{CardDeckId, GameState};
 
 use crate::cards::{CardService, LotteryService};
 use crate::economy::EconomyService;
@@ -37,11 +37,15 @@ impl EffectResolver {
                 Some(GameEvent::CardShopList { cards })
             },
             sa_monopoly_domain::TileKind::Lottery => {
-                let lottery_rules = LotteryRuleSet {
-                    enabled: true,
-                    ticket_price: 50,
-                };
-                Some(LotteryService::buy_ticket(state, &lottery_rules, rng))
+                LotteryService::ensure_initialized(state);
+                let lottery = state.lottery_state.as_ref().unwrap();
+                let jackpot = lottery.effective_jackpot(state.current_turn);
+                let ticket_price = sa_monopoly_domain::LotteryState::ticket_price_for_turn(state.current_turn);
+                Some(GameEvent::LotteryAvailable {
+                    ticket_price,
+                    jackpot,
+                    next_draw_turn: lottery.next_draw_turn,
+                })
             },
             sa_monopoly_domain::TileKind::Bank => {
                 if let Some(player) = state.active_player_mut() {

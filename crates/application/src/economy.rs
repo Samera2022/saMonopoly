@@ -2,6 +2,8 @@ use sa_monopoly_domain::DomainError;
 use sa_monopoly_domain::GameState;
 use sa_monopoly_domain::Money;
 
+use crate::events::GameEvent;
+
 pub struct EconomyService;
 
 impl EconomyService {
@@ -127,6 +129,81 @@ impl EconomyService {
         property.upgrade_level = current_level + 1;
 
         Ok(property.upgrade_level)
+    }
+
+    /// Buy a lottery ticket: player chooses a number (1-50) and pays the
+    /// ticket price.
+    pub fn buy_lottery_ticket(
+        state: &mut GameState,
+        number: u32,
+    ) -> Result<GameEvent, String> {
+        crate::cards::LotteryService::buy_ticket(state, number)
+    }
+
+    /// Use a card from the active player's inventory.
+    pub fn use_card(state: &mut GameState, card_id: &str) -> Result<GameEvent, String> {
+        let player_id = state
+            .active_player()
+            .map(|p| p.id.clone())
+            .ok_or("no_active_player".to_string())?;
+
+        // Check that the player actually owns this card
+        let has_card = state
+            .players
+            .get(state.active_player_index)
+            .map(|p| p.owned_cards.iter().any(|c| c == card_id))
+            .unwrap_or(false);
+        if !has_card {
+            return Err("card not owned".to_string());
+        }
+
+        match card_id {
+            "get_out_of_jail" => {
+                // Auto-consumed by engine on roll; mark as used
+                if let Some(player) = state.players.get_mut(state.active_player_index) {
+                    player.owned_cards.retain(|c| c != card_id);
+                    player.jail_turns = 0;
+                }
+                Ok(GameEvent::CardUsed {
+                    player_id,
+                    card_id: card_id.to_string(),
+                })
+            }
+            "bonus_200" => {
+                // Auto-consumed by engine on roll; manually use here
+                if let Some(player) = state.players.get_mut(state.active_player_index) {
+                    player.owned_cards.retain(|c| c != card_id);
+                    player.cash += 200;
+                }
+                Ok(GameEvent::CardUsed {
+                    player_id,
+                    card_id: card_id.to_string(),
+                })
+            }
+            "double_rent" => {
+                // This card is auto-consumed during rent payment;
+                // manually mark as ready for next rent
+                if let Some(player) = state.players.get_mut(state.active_player_index) {
+                    player.owned_cards.retain(|c| c != card_id);
+                }
+                Ok(GameEvent::CardUsed {
+                    player_id,
+                    card_id: card_id.to_string(),
+                })
+            }
+            "skip_turn" => {
+                // Skip the next turn by setting jail_turns = 1 (skip without jail)
+                if let Some(player) = state.players.get_mut(state.active_player_index) {
+                    player.owned_cards.retain(|c| c != card_id);
+                    player.jail_turns = 1;
+                }
+                Ok(GameEvent::CardUsed {
+                    player_id,
+                    card_id: card_id.to_string(),
+                })
+            }
+            _ => Err("unknown card".to_string()),
+        }
     }
 
     pub fn pay_rent(state: &mut GameState, tile_id: &str) -> Result<(Money, bool), DomainError> {

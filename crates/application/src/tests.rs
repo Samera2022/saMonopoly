@@ -111,6 +111,7 @@ fn test_state() -> GameState {
         consecutive_doubles: 0,
         max_upgrade_level: 3,
         extension_upgrade_enabled: false,
+        lottery_state: None,
     }
 }
 

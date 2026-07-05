@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::board::Board;
 use crate::card::CardDeck;
+use crate::lottery::LotteryState;
 use crate::market::StockMarketRule;
 use crate::player::Player;
 use crate::rules::RuleSetRef;
@@ -32,6 +33,8 @@ pub struct GameState {
     pub max_upgrade_level: u64,
     /// Whether Extension properties (utilities) can be upgraded.
     pub extension_upgrade_enabled: bool,
+    /// State of the lottery sub-system (None = lottery not yet initialized).
+    pub lottery_state: Option<LotteryState>,
 }
 
 impl GameState {

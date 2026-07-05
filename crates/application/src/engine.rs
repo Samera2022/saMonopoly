@@ -657,6 +657,22 @@ impl GameEngine {
                 }
             }
 
+            // ─── Lottery ───────────────────────────────────────────────────────
+            GameCommand::BuyLotteryTicket { number } => {
+                match EconomyService::buy_lottery_ticket(state, number) {
+                    Ok(event) => event,
+                    Err(reason) => GameEvent::CommandRejected { reason },
+                }
+            }
+
+            // ─── Use Card ──────────────────────────────────────────────────────
+            GameCommand::UseCard { card_id } => {
+                match EconomyService::use_card(state, &card_id) {
+                    Ok(event) => event,
+                    Err(reason) => GameEvent::CommandRejected { reason },
+                }
+            }
+
             // ─── Bid ───────────────────────────────────────────────────────────
             GameCommand::Bid {
                 player_id,

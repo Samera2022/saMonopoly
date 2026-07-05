@@ -5,10 +5,13 @@ import 'package:flutter/material.dart';
 
 import 'board_view.dart';
 import 'bridge_client.dart';
+import 'card_inventory_dialog.dart';
+import 'card_shop_dialog.dart';
 import 'config_provider.dart';
 import 'content_pack.dart';
 import 'content_pack_loader.dart';
 import 'isometric_board.dart';
+import 'lottery_dialog.dart';
 
 // ============================================================================
 // Game state management (simple InheritedWidget)
@@ -508,9 +511,96 @@ class _GameScreenState extends State<GameScreen> {
         }
         break;
 
+      case 'CardShop':
+        await _showCardShopDialog();
+        break;
+
+      case 'Lottery':
+        await _showLotteryPickerDialog();
+        break;
+
       default:
         break;
     }
+  }
+
+  Future<void> _onBuyCard(String cardId, int price) async {
+    final response = await _bridgeClient.executeCommand(
+      command: BridgeCommand.buyCard(cardId, price),
+      currentState: _currentState,
+    );
+    setState(() {
+      _currentState = response.state;
+      _gameState = _buildGameState(response.state, lastEvent: 'Bought $cardId');
+    });
+    _addLog('Bought card: $cardId');
+  }
+
+  Future<void> _onUseCard(String cardId) async {
+    final response = await _bridgeClient.executeCommand(
+      command: BridgeCommand(type: 'UseCard', params: {'card_id': cardId}),
+      currentState: _currentState,
+    );
+    setState(() {
+      _currentState = response.state;
+      _gameState = _buildGameState(response.state, lastEvent: 'Used $cardId');
+    });
+    _addLog('Used card: $cardId');
+  }
+
+  Future<void> _onBuyLotteryTicket(int number) async {
+    final response = await _bridgeClient.executeCommand(
+      command: BridgeCommand(
+          type: 'BuyLotteryTicket', params: {'number': number}),
+      currentState: _currentState,
+    );
+    setState(() {
+      _currentState = response.state;
+      _gameState =
+          _buildGameState(response.state, lastEvent: 'Lottery #$number');
+    });
+    _addLog('Bought lottery ticket #$number');
+  }
+
+  Future<void> _showCardShopDialog() async {
+    final player = _gameState.players[_gameState.activePlayerIndex];
+    if (!mounted) return;
+    await showDialog(
+      context: context,
+      builder: (ctx) => CardShopDialog(
+        playerCash: player.cash,
+        onBuy: (cardId, price) => _onBuyCard(cardId, price),
+      ),
+    );
+  }
+
+  void _showCardInventoryDialog() {
+    final player = _gameState.players[_gameState.activePlayerIndex];
+    final ownedCards = BridgeClient.parsePlayers(_currentState)
+        .firstWhere((p) => p.id == player.id)
+        .ownedCards;
+    showDialog(
+      context: context,
+      builder: (ctx) => CardInventoryDialog(
+        ownedCardIds: ownedCards,
+        onUse: (cardId) => _onUseCard(cardId),
+      ),
+    );
+  }
+
+  Future<void> _showLotteryPickerDialog() async {
+    // In simulation mode, show a simple UI with default values
+    if (!mounted) return;
+    await showDialog(
+      context: context,
+      builder: (ctx) => LotteryPickerDialog(
+        jackpot: 500,
+        ticketPrice: 50,
+        nextDrawTurn: 15,
+        alreadyPicked: false,
+        onPick: (number) => _onBuyLotteryTicket(number),
+      ),
+    );
   }
 
   void _deductCash(int playerIdx, int amount) {
@@ -871,34 +961,7 @@ class _GameScreenState extends State<GameScreen> {
     );
   }
 
-  void _showCardShopDialog() {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Card Shop'),
-        content: const Text(
-          'Available cards:\n'
-          '• Get Out of Jail Free — \$50\n'
-          '• Double Rent — \$30\n'
-          '• Bonus \$200 — \$100\n'
-          '• Skip Turn — \$20',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('Close'),
-          ),
-          FilledButton(
-            onPressed: () {
-              Navigator.of(ctx).pop();
-              _addLog('Card purchased from shop');
-            },
-            child: const Text('Buy Card'),
-          ),
-        ],
-      ),
-    );
-  }
+  // (Replaced by _showCardShopDialog above)
 
   void _showSettingsDialog() {
     showDialog(
@@ -1235,11 +1298,11 @@ class _GameScreenState extends State<GameScreen> {
           label: const Text('Trade'),
         ),
         const SizedBox(height: 4),
-        // Card shop
+        // Card inventory
         OutlinedButton.icon(
-          onPressed: () => _showCardShopDialog(),
-          icon: const Icon(Icons.style, size: 18),
-          label: const Text('Card Shop'),
+          onPressed: () => _showCardInventoryDialog(),
+          icon: const Icon(Icons.inventory_2, size: 18),
+          label: const Text('Inventory'),
         ),
         const SizedBox(height: 4),
         // End turn

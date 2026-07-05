@@ -421,6 +421,31 @@ class BridgeClient {
         event['shares'] = request.command.params?['shares'] as int? ?? 0;
         break;
 
+      case 'BuyLotteryTicket':
+        final number = request.command.params?['number'] as int? ?? 1;
+        event['event_type'] = 'LotteryTicketBought';
+        event['player_id'] = _activePlayerId(state);
+        event['number'] = number;
+        event['ticket_price'] = 50;
+        // Deduct ticket price
+        final ltPlayers = List<Map<String, dynamic>>.from(
+            (state['players'] as List<dynamic>?)?.cast() ?? []);
+        final ltIdx = state['active_player_index'] as int? ?? 0;
+        if (ltIdx < ltPlayers.length) {
+          final p = Map<String, dynamic>.from(ltPlayers[ltIdx]);
+          p['cash'] = ((p['cash'] as num?)?.toInt() ?? 0) - 50;
+          ltPlayers[ltIdx] = p;
+          state['players'] = ltPlayers;
+        }
+        break;
+
+      case 'UseCard':
+        event['event_type'] = 'CardUsed';
+        event['player_id'] = _activePlayerId(state);
+        event['card_id'] =
+            request.command.params?['card_id'] as String? ?? '';
+        break;
+
       case 'ConfigGet':
         event['event_type'] = 'ConfigLoaded';
         break;
