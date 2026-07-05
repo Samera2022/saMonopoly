@@ -27,6 +27,11 @@ pub struct GameState {
     pub stock_market: Option<StockMarketRule>,
     pub active_auction: Option<ActiveAuction>,
     pub consecutive_doubles: u32,
+    /// Maximum property upgrade level (0 = upgrades disabled).
+    /// Rent and upgrade cost are calculated by formula from the current level.
+    pub max_upgrade_level: u64,
+    /// Whether Extension properties (utilities) can be upgraded.
+    pub extension_upgrade_enabled: bool,
 }
 
 impl GameState {

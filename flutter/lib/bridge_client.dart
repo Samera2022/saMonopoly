@@ -89,6 +89,15 @@ class BridgeCommand {
         type: 'SellShares',
         params: {'player_id': playerId, 'shares': shares},
       );
+
+  factory BridgeCommand.configGet() =>
+      const BridgeCommand(type: 'ConfigGet');
+
+  factory BridgeCommand.configSet(String section, Map<String, dynamic> value) =>
+      BridgeCommand(
+        type: 'ConfigSet',
+        params: {'section': section, 'value': value},
+      );
 }
 
 /// Bridge request – matches [crate::bridge::BridgeRequest] on the Rust side.
@@ -252,9 +261,22 @@ class BridgeClient {
     // Apply command-specific mutations to the state clone.
     switch (commandType) {
       case 'Roll':
-        final dice1 = (state['seed'] as num?)?.toInt() ?? 1;
-        final dice2 = ((state['seed'] as num?)?.toInt() ?? 1) % 6 + 1;
-        final steps = (dice1 % 6 + 1) + dice2;
+        // Use XorShift64 to generate two independent pseudorandom dice
+        // values, mirroring the Rust engine's approach.
+        int seed = (state['seed'] as num?)?.toInt() ?? 42;
+        // Advance RNG state for dice1
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        final dice1 = (seed & 0x7fffffff) % 6 + 1;
+        // Advance RNG state for dice2
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        final dice2 = (seed & 0x7fffffff) % 6 + 1;
+        state['seed'] = seed;
+
+        final steps = dice1 + dice2;
         final activeIdx = state['active_player_index'] as int? ?? 0;
         final players = List<Map<String, dynamic>>.from(
             (state['players'] as List<dynamic>?)?.cast() ?? []);
@@ -271,8 +293,7 @@ class BridgeClient {
           }
           players[activeIdx] = player;
           state['players'] = players;
-          state['seed'] = ((state['seed'] as num?)?.toInt() ?? 0) + 1;
-          event['dice1'] = dice1 % 6 + 1;
+          event['dice1'] = dice1;
           event['dice2'] = dice2;
           event['player_id'] = player['id'];
           event['to_tile'] = player['position'];
@@ -283,15 +304,29 @@ class BridgeClient {
         final tileId = request.command.params?['tile_id'] as String? ?? '';
         event['tile_id'] = tileId;
         event['player_id'] = _activePlayerId(state);
-        // Mark property as owned
+        // Find the property and get its price
         final properties = List<Map<String, dynamic>>.from(
             ((state['board'] as Map<String, dynamic>?)?
                     ['properties'] as List<dynamic>?)
                 ?.cast() ?? []);
+        int? price;
         for (final prop in properties) {
           if (prop['tile_id'] == tileId) {
+            price = (prop['base_price'] as num?)?.toInt();
             prop['owner'] = _activePlayerId(state);
             break;
+          }
+        }
+        // Deduct the price from the active player's cash
+        if (price != null && price > 0) {
+          final players = List<Map<String, dynamic>>.from(
+              (state['players'] as List<dynamic>?)?.cast() ?? []);
+          final activeIdx = state['active_player_index'] as int? ?? 0;
+          if (activeIdx < players.length) {
+            final player = Map<String, dynamic>.from(players[activeIdx]);
+            player['cash'] = ((player['cash'] as num?)?.toInt() ?? 0) - price;
+            players[activeIdx] = player;
+            state['players'] = players;
           }
         }
         break;
@@ -311,7 +346,38 @@ class BridgeClient {
         break;
 
       case 'UpgradeProperty':
-        event['tile_id'] = request.command.params?['tile_id'] as String? ?? '';
+        final tileId = request.command.params?['tile_id'] as String? ?? '';
+        event['tile_id'] = tileId;
+        event['event_type'] = 'CommandAccepted';
+        // Find the property and apply the upgrade
+        final upProperties = List<Map<String, dynamic>>.from(
+            ((state['board'] as Map<String, dynamic>?)?
+                    ['properties'] as List<dynamic>?)
+                ?.cast() ?? []);
+        for (final prop in upProperties) {
+          if (prop['tile_id'] == tileId) {
+            final currentLevel = (prop['upgrade_level'] as num?)?.toInt() ?? 0;
+            final basePrice = (prop['base_price'] as num).toInt();
+            final base = (prop['rent'] as List<dynamic>?)?.isNotEmpty == true
+                ? ((prop['rent'] as List<dynamic>).first as num).toInt()
+                : basePrice;
+            final cost = base * (1 + currentLevel) ~/ 2;
+            // Deduct cost from active player
+            final upPlayers = List<Map<String, dynamic>>.from(
+                (state['players'] as List<dynamic>?)?.cast() ?? []);
+            final activeIdx = state['active_player_index'] as int? ?? 0;
+            if (activeIdx < upPlayers.length) {
+              final player = Map<String, dynamic>.from(upPlayers[activeIdx]);
+              player['cash'] = ((player['cash'] as num?)?.toInt() ?? 0) - cost;
+              upPlayers[activeIdx] = player;
+              state['players'] = upPlayers;
+            }
+            // Increment level
+            prop['upgrade_level'] = currentLevel + 1;
+            event['name'] = 'upgrade_property:$tileId:${currentLevel + 1}';
+            break;
+          }
+        }
         break;
 
       case 'Mortgage':
@@ -353,6 +419,16 @@ class BridgeClient {
         event['player_id'] =
             request.command.params?['player_id'] as String? ?? '';
         event['shares'] = request.command.params?['shares'] as int? ?? 0;
+        break;
+
+      case 'ConfigGet':
+        event['event_type'] = 'ConfigLoaded';
+        break;
+
+      case 'ConfigSet':
+        event['event_type'] = 'ConfigUpdated';
+        event['section'] =
+            request.command.params?['section'] as String? ?? '';
         break;
 
       default:

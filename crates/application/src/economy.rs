@@ -43,11 +43,89 @@ impl EconomyService {
     }
 
     pub fn upgrade_property(state: &mut GameState, tile_id: &str) -> Result<u32, DomainError> {
+        use sa_monopoly_domain::property::PropertyKind;
+
+        // ─── Check max_upgrade_level (0 = disabled) ──────────────────────────
+        if state.max_upgrade_level == 0 {
+            return Err(DomainError::UpgradesDisabled);
+        }
+
+        // ─── Ownership check & kind validation ────────────────────────────────
+        let active_player_id = state
+            .active_player()
+            .map(|p| p.id.clone())
+            .ok_or(DomainError::ActivePlayerNotFound)?;
+
+        let (current_level, base) = {
+            let property = state
+                .board
+                .property(tile_id)
+                .ok_or_else(|| DomainError::TileNotFound(tile_id.to_string()))?;
+
+            // Only Ordinary properties can be upgraded by default.
+            // Extension (utility) properties can only be upgraded when the
+            // `extension_upgrade_enabled` flag is set.
+            match property.kind {
+                PropertyKind::Ordinary => { /* allowed */ }
+                PropertyKind::Extension if state.extension_upgrade_enabled => { /* allowed */ }
+                PropertyKind::Extension => {
+                    return Err(DomainError::InvalidCommand(
+                        "extension upgrades are disabled".to_string(),
+                    ));
+                }
+                _ => {
+                    return Err(DomainError::InvalidCommand(
+                        "only ordinary properties can be upgraded".to_string(),
+                    ));
+                }
+            }
+
+            // Verify ownership
+            if property.owner.as_deref() != Some(&active_player_id) {
+                return Err(DomainError::UpgradeNotOwned(tile_id.to_string()));
+            }
+
+            (property.upgrade_level, property.rent.first().copied().unwrap_or(property.base_price))
+        };
+
+        // ─── Max level check ──────────────────────────────────────────────────
+        let max_level = state.max_upgrade_level as u32;
+        if current_level >= max_level {
+            return Err(DomainError::MaxUpgradeLevel(
+                tile_id.to_string(),
+                max_level as u64,
+            ));
+        }
+
+        // ─── Deduct upgrade cost ──────────────────────────────────────────────
+        // cost = base * (1 + current_level) / 2
+        let cost = base * (1 + current_level as i64) / 2;
+
+        // Check affordability before mutating
+        let player = state
+            .players
+            .get(state.active_player_index)
+            .ok_or(DomainError::ActivePlayerNotFound)?;
+        if player.cash < cost {
+            return Err(DomainError::InsufficientFunds {
+                have: player.cash,
+                need: cost,
+            });
+        }
+
+        // ─── Apply upgrade ────────────────────────────────────────────────────
+        // Deduct cost from player
+        if let Some(player) = state.players.get_mut(state.active_player_index) {
+            player.cash -= cost;
+        }
+
+        // Increment upgrade level
         let property = state
             .board
             .property_mut(tile_id)
             .ok_or_else(|| DomainError::TileNotFound(tile_id.to_string()))?;
-        property.upgrade_level = property.upgrade_level.saturating_add(1);
+        property.upgrade_level = current_level + 1;
+
         Ok(property.upgrade_level)
     }
 

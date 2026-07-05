@@ -1,6 +1,7 @@
 pub mod bridge;
 pub mod cards;
 pub mod commands;
+pub mod config;
 pub mod economy;
 pub mod effects;
 pub mod engine;

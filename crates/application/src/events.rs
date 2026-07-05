@@ -45,6 +45,9 @@ pub enum GameEvent {
     SharesSold { player_id: String, shares: u32, total_payout: i64, price_per_share: i64 },
     // Sprint 7: Game End
     GameWon { winner_id: String, remaining_players: u32 },
+    // Config
+    ConfigLoaded { config: serde_json::Value },
+    ConfigUpdated { section: String },
 }
 
 pub trait EventBus<E> {

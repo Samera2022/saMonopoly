@@ -28,4 +28,8 @@ pub enum GameCommand {
     Redeem { tile_id: String },
     /// Sell shares in the stock market at the current price.
     SellShares { player_id: String, shares: u32 },
+    /// Get the full configuration document (returns ConfigLoaded event).
+    ConfigGet,
+    /// Set a configuration section (returns ConfigUpdated event).
+    ConfigSet { section: String, value: serde_json::Value },
 }

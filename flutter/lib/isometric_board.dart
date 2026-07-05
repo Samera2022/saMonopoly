@@ -204,8 +204,12 @@ class IsometricBoardPainter extends CustomPainter {
       ..style = PaintingStyle.stroke
       ..strokeWidth = 0.5);
 
-    // Ownership color strip (lower half of diamond)
-    if (ownerColor != null && (tile.kind == 'OrdinaryProperty' || tile.kind == 'SpecialProperty')) {
+    // Ownership color strip (lower half of diamond).
+    // Shown for all ownable property types when owned.
+    if (ownerColor != null &&
+        (tile.kind == 'OrdinaryProperty' ||
+         tile.kind == 'SpecialProperty' ||
+         tile.kind == 'ExtensionProperty')) {
       final ownerDiamond = Path()
         ..moveTo(center.dx, center.dy)             // center
         ..lineTo(center.dx + hw, center.dy)         // right
@@ -213,6 +217,22 @@ class IsometricBoardPainter extends CustomPainter {
         ..lineTo(center.dx - hw, center.dy)         // left
         ..close();
       canvas.drawPath(ownerDiamond, Paint()..color = ownerColor.withOpacity(0.6));
+
+      // House icon in the centre of the ownership triangle
+      // as a colour-independent ownership indicator.
+      final houseSize = math.max(tileWidth * camera.zoom * 0.12, 5.0);
+      final housePainter = TextPainter(
+        text: TextSpan(
+          text: '🏠',
+          style: TextStyle(fontSize: houseSize),
+        ),
+        textDirection: TextDirection.ltr,
+      );
+      housePainter.layout();
+      housePainter.paint(
+        canvas,
+        Offset(center.dx - housePainter.width / 2, center.dy + hh * 0.3),
+      );
     }
   }
 
@@ -403,6 +423,12 @@ class MinimapPainter extends CustomPainter {
 
       if (ownerColor != null) {
         canvas.drawPath(path, Paint()..color = ownerColor.withOpacity(0.7));
+      } else if (tile.kind == 'OrdinaryProperty' ||
+                 tile.kind == 'SpecialProperty' ||
+                 tile.kind == 'ExtensionProperty') {
+        // Unowned property tiles → grey, so the tile's own colour
+        // is never mistaken for an owner indicator on the minimap.
+        canvas.drawPath(path, Paint()..color = Colors.grey.withOpacity(0.35));
       } else {
         canvas.drawPath(path, Paint()..color = tile.color.withOpacity(0.3));
       }

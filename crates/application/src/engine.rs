@@ -645,6 +645,18 @@ impl GameEngine {
                 }
                 event
             }
+            // ─── Config commands (handled at bridge level) ─────────────────────
+            GameCommand::ConfigGet => {
+                GameEvent::CommandRejected {
+                    reason: "config_not_available_in_engine".to_string(),
+                }
+            }
+            GameCommand::ConfigSet { section: _, value: _ } => {
+                GameEvent::CommandRejected {
+                    reason: "config_not_available_in_engine".to_string(),
+                }
+            }
+
             // ─── Bid ───────────────────────────────────────────────────────────
             GameCommand::Bid {
                 player_id,

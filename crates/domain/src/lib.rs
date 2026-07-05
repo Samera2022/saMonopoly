@@ -1,5 +1,6 @@
 pub mod board;
 pub mod card;
+pub mod config;
 pub mod error;
 pub mod market;
 pub mod movement;

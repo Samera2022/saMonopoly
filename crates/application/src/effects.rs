@@ -75,18 +75,27 @@ impl EffectResolver {
                 let owner_id = state.board.property(tile_id).and_then(|p| p.owner.clone());
                 match owner_id {
                     Some(owner) => {
-                        // Use the actual amount returned by pay_rent (which reflects
-                        // any double_rent card doubling), not the static current_rent.
-                        let (actual_amount, _card_consumed) =
-                            EconomyService::pay_rent(state, tile_id).ok()?;
-                        Some(GameEvent::RentPaid {
-                            from_player_id: state
-                                .active_player()
-                                .map(|p| p.id.clone())
-                                .unwrap_or_default(),
-                            to_player_id: owner,
-                            amount: actual_amount,
-                        })
+                        let active_player_id = state
+                            .active_player()
+                            .map(|p| p.id.clone())
+                            .unwrap_or_default();
+                        // If the player lands on their own property, skip rent and
+                        // emit a special event so the turn processor can offer an upgrade.
+                        if owner == active_player_id {
+                            Some(GameEvent::CommandAccepted {
+                                name: "own_property".to_string(),
+                            })
+                        } else {
+                            // Use the actual amount returned by pay_rent (which reflects
+                            // any double_rent card doubling), not the static current_rent.
+                            let (actual_amount, _card_consumed) =
+                                EconomyService::pay_rent(state, tile_id).ok()?;
+                            Some(GameEvent::RentPaid {
+                                from_player_id: active_player_id,
+                                to_player_id: owner,
+                                amount: actual_amount,
+                            })
+                        }
                     }
                     None => Some(GameEvent::CommandAccepted {
                         name: "unowned_property".to_string(),
