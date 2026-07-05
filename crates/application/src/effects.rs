@@ -48,21 +48,52 @@ impl EffectResolver {
                 })
             },
             sa_monopoly_domain::TileKind::Bank => {
-                if let Some(player) = state.active_player_mut() {
-                    player.cash += 200;
-                }
-                Some(GameEvent::CommandAccepted { name: "bank_deposit_200".to_string() })
+                // Differentiate based on tile_id:
+                //   "tax_1" = Income Tax: pay $200
+                //   "tax_2" = Luxury Tax: pay $100
+                //   otherwise = Free Parking: receive $200
+                let event_name = if tile_id == "tax_1" {
+                    if let Some(player) = state.active_player_mut() {
+                        player.cash -= 200;
+                    }
+                    "income_tax_200"
+                } else if tile_id == "tax_2" {
+                    if let Some(player) = state.active_player_mut() {
+                        player.cash -= 100;
+                    }
+                    "luxury_tax_100"
+                } else {
+                    if let Some(player) = state.active_player_mut() {
+                        player.cash += 200;
+                    }
+                    "free_parking_200"
+                };
+                Some(GameEvent::CommandAccepted { name: event_name.to_string() })
             },
             sa_monopoly_domain::TileKind::Jail => {
-                let player_id =
-                    state.active_player().map(|p| p.id.clone()).unwrap_or_default();
-                if let Some(player) = state.active_player_mut() {
-                    player.jail_turns = 3;
+                if tile_id == "go_to_jail" {
+                    let player_id =
+                        state.active_player().map(|p| p.id.clone()).unwrap_or_default();
+                    // Find the "Jail" tile to send player to
+                    let jail_tile_id = state.board.tiles.iter()
+                        .find(|t| t.id == "jail" || (t.kind == sa_monopoly_domain::TileKind::Jail && t.id != "go_to_jail"))
+                        .map(|t| t.id.clone());
+                    if let Some(player) = state.active_player_mut() {
+                        player.jail_turns = 3;
+                        if let Some(jail_id) = jail_tile_id {
+                            player.position = jail_id;
+                        }
+                    }
+                    Some(GameEvent::PlayerSentToJail {
+                        player_id,
+                        turns: 3,
+                    })
+                } else {
+                    // Just Visiting — no effect
+                    Some(GameEvent::CommandAccepted {
+                        name: "just_visiting_jail".to_string(),
+                    })
                 }
-                Some(GameEvent::PlayerSentToJail {
-                    player_id,
-                    turns: 3,
-                })
             }
             sa_monopoly_domain::TileKind::Hospital => {
                 let player_id =

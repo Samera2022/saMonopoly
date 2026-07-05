@@ -29,7 +29,7 @@ impl GameEngine {
                 let dice1 = (rng.next_u64() % 6) + 1;
                 let dice2 = (rng.next_u64() % 6) + 1;
                 let steps = (dice1 + dice2) as usize;
-                let is_doubles = dice1 == dice2;
+                let is_seven = dice1 + dice2 == 7;
 
                 let active_idx = state.active_player_index;
 
@@ -97,15 +97,15 @@ impl GameEngine {
                         }
                     }
 
-                    // ─── Sprint 4: Doubles tracking ────────────────────────────────
-                    if is_doubles {
+                    // ─── Sum-7 tracking (replaces standard doubles) ────────────────
+                    if is_seven {
                         state.consecutive_doubles += 1;
                     } else {
                         state.consecutive_doubles = 0;
                     }
 
-                    // 3 consecutive doubles → go to jail (no tile effect)
-                    if is_doubles && state.consecutive_doubles >= 3 {
+                    // 3 consecutive sum-7 rolls → go to jail (no tile effect)
+                    if is_seven && state.consecutive_doubles >= 3 {
                         state.consecutive_doubles = 0;
                         // Clone jail tile ID before mutable borrow
                         let jail_tile_id = state
@@ -123,8 +123,8 @@ impl GameEngine {
                         return GameEvent::ThreeDoublesToJail { player_id: pid };
                     }
 
-                    // ─── Tile effect resolution ─────────────────────────────────────
-                    let tile_event =
+                    // ─── Tile effect resolution (side effects on state) ────────────
+                    let _tile_event =
                         EffectResolver::resolve_special_tile(state, &result.to, rng);
 
                     // ─── Sprint 4: Bankruptcy check after tile effect ───────────────
@@ -147,17 +147,13 @@ impl GameEngine {
                     }
 
                     // ─── Determine return event ────────────────────────────────────
-                    if is_doubles {
-                        GameEvent::DoublesRolled {
-                            dice1,
-                            dice2,
-                            consecutive: state.consecutive_doubles,
-                        }
-                    } else {
-                        tile_event.unwrap_or(GameEvent::PlayerMoved {
-                            player_id: pid,
-                            to_tile: result.to,
-                        })
+                    // Always return DiceRolled so Flutter can read the dice values.
+                    // Tile effects are handled separately by the UI via _resolveTileEffect.
+                    GameEvent::DiceRolled {
+                        dice1,
+                        dice2,
+                        is_seven,
+                        consecutive: state.consecutive_doubles,
                     }
                 } else {
                     GameEvent::CommandRejected {
@@ -290,7 +286,7 @@ impl GameEngine {
                 }
 
                 // Validate card_id against predefined shop cards
-                let valid_cards = ["get_out_of_jail", "bonus_200", "double_rent"];
+                let valid_cards = ["get_out_of_jail", "bonus_200", "double_rent", "skip_turn"];
                 if !valid_cards.contains(&card_id.as_str()) {
                     return GameEvent::CommandRejected {
                         reason: "invalid_card".to_string(),

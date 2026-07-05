@@ -117,7 +117,7 @@ class GameScreen extends StatefulWidget {
 }
 
 class _GameScreenState extends State<GameScreen> {
-  final BridgeClient _bridgeClient = const BridgeClient();
+  final BridgeClient _bridgeClient = BridgeClient();
   final ContentPackLoader _loader = const ContentPackLoader();
   final ScrollController _logScrollController = ScrollController();
 
@@ -369,7 +369,10 @@ class _GameScreenState extends State<GameScreen> {
       'stock_market': null,
       'active_auction': null,
       'consecutive_doubles': 0,
+      'max_upgrade_level': 3,
+      'extension_upgrade_enabled': false,
       'group_rent_enabled': _useComplexBoard, // enable group rent for test
+      'lottery_state': null,
     };
   }
 
@@ -549,6 +552,9 @@ class _GameScreenState extends State<GameScreen> {
       command: BridgeCommand.roll(),
       currentState: _currentState,
     );
+    // Debug: print raw event to see what Rust engine returns
+    debugPrint('Roll response event: ${response.event}');
+    // Read dice values from the response event.
     final dice1 = (response.event['dice1'] as num?)?.toInt() ?? 0;
     final dice2 = (response.event['dice2'] as num?)?.toInt() ?? 0;
     final steps = dice1 + dice2;
@@ -625,13 +631,12 @@ class _GameScreenState extends State<GameScreen> {
     // on the turn they first arrive).
     _landedTileIdThisTurn = playerPos;
 
-    // Decrement rolls remaining; if single die shows 6, grant re-roll
+    // Decrement rolls remaining; if sum of two dice equals 7, grant re-roll
     _rollsRemainingThisTurn--;
-    // Single die mode: die face = dice1 (simulated as dice1%6+1)
-    final dieFace = dice1; // already the displayed face value
-    if (dieFace == 6) {
+    final diceSum = dice1 + dice2;
+    if (diceSum == 7) {
       _rollsRemainingThisTurn++;
-      _addLog('Rolled a 6! Extra roll granted.');
+      _addLog('Rolled 7! Extra roll granted.');
     }
     setState(() {}); // refresh button state
 
@@ -1389,6 +1394,17 @@ class _GameScreenState extends State<GameScreen> {
 
   // ---- Build ---------------------------------------------------------------
 
+  /// Build a lookup map of tile_id → display name from the initial tile source.
+  /// Needed because the Rust `Tile` struct only has `name_key`, not `name`.
+  Map<String, String> get _tileNames {
+    final tileSource = _useComplexBoard ? _complexTiles : _defaultTiles;
+    final map = <String, String>{};
+    for (final t in tileSource) {
+      map[t['id']!] = t['name']!;
+    }
+    return map;
+  }
+
   @override
   Widget build(BuildContext context) {
     final activePlayer =
@@ -1397,18 +1413,27 @@ class _GameScreenState extends State<GameScreen> {
             ? _gameState.players[_gameState.activePlayerIndex]
             : null;
 
+    final tileNames = _tileNames;
+
     // Convert raw tiles to BoardTileViewModel for the board
     final rawTiles = (_currentState['board'] as Map<String, dynamic>?)?
             ['tiles'] as List<dynamic>? ??
         [];
     final tiles = rawTiles
-        .map((t) => BoardTileViewModel(
-              id: t['id'] as String,
-              name: t['name'] as String? ??
-                  t['name_key'] as String? ??
-                  t['id'] as String,
-              kind: t['kind'] as String? ?? 'Unknown',
-            ))
+        .map((t) {
+          final id = t['id'] as String;
+          // Prefer the original display name from the tile source; fall back
+          // to name_key or id when Rust strips the 'name' field after round-trip.
+          final displayName = t['name'] as String? ??
+              tileNames[id] ??
+              t['name_key'] as String? ??
+              id;
+          return BoardTileViewModel(
+            id: id,
+            name: displayName,
+            kind: t['kind'] as String? ?? 'Unknown',
+          );
+        })
         .toList();
 
     // Determine player property owners for display

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "event_type")]
 pub enum GameEvent {
     GameStarted,
     CommandAccepted { name: String },
@@ -32,8 +33,8 @@ pub enum GameEvent {
     // Sprint 4: Bankruptcy
     PlayerBankrupt { player_id: String },
     PlayerEliminated { player_id: String },
-    // Sprint 4: Doubles
-    DoublesRolled { dice1: u64, dice2: u64, consecutive: u32 },
+    // Sprint 4: Dice roll result
+    DiceRolled { dice1: u64, dice2: u64, is_seven: bool, consecutive: u32 },
     ExtraTurn { player_id: String },
     ThreeDoublesToJail { player_id: String },
     // Sprint 6: Card Shop

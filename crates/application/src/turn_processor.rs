@@ -52,8 +52,8 @@ impl TurnProcessor {
         let roll_event = GameEngine::execute(GameCommand::Roll, state, rng);
         events.push(roll_event.clone());
 
-        // Sprint 4: Extra turn from doubles — skip EndTurn
-        if matches!(&roll_event, GameEvent::ExtraTurn { .. } | GameEvent::DoublesRolled { .. }) {
+        // Sprint 7: Extra turn from sum-7 — skip EndTurn
+        if matches!(&roll_event, GameEvent::ExtraTurn { .. } | GameEvent::DiceRolled { is_seven: true, .. }) {
             return events;
         }
 
