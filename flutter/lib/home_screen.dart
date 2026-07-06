@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'main.dart' show GameScreen;
+import 'map_manager_screen.dart';
 import 'map_selection_screen.dart';
 import 'save_manager.dart';
 
@@ -233,7 +234,11 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _onMapFeature(BuildContext context) {
-    _showComingSoon(context, '地图功能');
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => const MapManagerScreen(),
+      ),
+    );
   }
 
   void _onModFeature(BuildContext context) {

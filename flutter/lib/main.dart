@@ -1111,6 +1111,34 @@ class _GameScreenState extends State<GameScreen> {
     }
   }
 
+  /// Exit to home screen with confirmation.
+  Future<void> _onExitToHome() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('返回主菜单'),
+        content: const Text('确定要退出当前游戏吗？未保存的进度将丢失。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
+            child: const Text('退出'),
+          ),
+        ],
+      ),
+    );
+    if (confirm == true && mounted) {
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => const HomeScreen()),
+        (route) => false,
+      );
+    }
+  }
+
   Future<void> _onEndTurn() async {
     final response = await _bridgeClient.executeCommand(
       command: BridgeCommand.endTurn(),
@@ -1677,6 +1705,11 @@ class _GameScreenState extends State<GameScreen> {
               icon: const Icon(Icons.save_rounded),
               tooltip: '保存游戏',
               onPressed: _onSaveGame,
+            ),
+            IconButton(
+              icon: const Icon(Icons.home_rounded),
+              tooltip: '返回主菜单',
+              onPressed: _onExitToHome,
             ),
             IconButton(
               icon: const Icon(Icons.settings),
