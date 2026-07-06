@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use serde::{Deserialize, Serialize};
 
 use sa_monopoly_domain::GameState;
@@ -54,6 +56,8 @@ impl crate::ports::RngService for BridgeRng {
 
 pub struct EngineBridge;
 
+static BROADCASTER: OnceLock<Box<dyn Fn(&BridgeResponse) + Send + Sync>> = OnceLock::new();
+
 impl EngineBridge {
     pub fn execute(request: BridgeRequest) -> BridgeResponse {
         let mut state = request.state;
@@ -64,6 +68,18 @@ impl EngineBridge {
         // the same seed (which would produce identical dice rolls etc.).
         state.seed = rng.current_state();
         BridgeResponse { event, state }
+    }
+
+    pub fn set_broadcaster(f: Box<dyn Fn(&BridgeResponse) + Send + Sync>) {
+        let _ = BROADCASTER.set(f);
+    }
+
+    pub fn execute_with_broadcast(request: BridgeRequest) -> BridgeResponse {
+        let response = Self::execute(request);
+        if let Some(broadcaster) = BROADCASTER.get() {
+            broadcaster(&response);
+        }
+        response
     }
 
     pub fn execute_json(input: &str) -> Result<String, String> {

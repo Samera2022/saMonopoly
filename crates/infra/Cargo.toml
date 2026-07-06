@@ -11,6 +11,9 @@ thiserror.workspace = true
 sa-monopoly-domain = { path = "../domain" }
 sa-monopoly-application = { path = "../application" }
 zip = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
 
 # Optional scripting backends
 mlua = { version = "0.10", features = ["vendored"], optional = true }

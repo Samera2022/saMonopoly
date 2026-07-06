@@ -1,6 +1,9 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+
+import 'network_service.dart' show NetworkService;
 
 import 'config_provider.dart' show ConfigProvider, GameConfig, NetworkConfig;
 import 'main.dart' show GameScreen;
@@ -23,6 +26,8 @@ class PlayerSlotData {
   int? pingMs;
   /// Team colour (outer ring). Null means no team assigned.
   Color? teamColor;
+  /// Whether this player is ready (online lobby).
+  bool isReady = false;
 
   PlayerSlotData({
     required this.id,
@@ -31,6 +36,7 @@ class PlayerSlotData {
     this.type = PlayerSlotType.human,
     this.pingMs,
     this.teamColor,
+    this.isReady = false,
   });
 }
 
@@ -94,6 +100,9 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
   final TextEditingController _connectIpCtrl =
       TextEditingController(text: '127.0.0.1:9000');
 
+  NetworkService? _networkService;
+  StreamSubscription<Map<String, dynamic>>? _netSub;
+
   // ── Player slots ──────────────────────────────────────────────────────────
   late List<PlayerSlotData> _slots;
 
@@ -131,6 +140,7 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
         color: _slotColors[0],
         type: PlayerSlotType.human,
         teamColor: null,
+        isReady: false,
       ),
       PlayerSlotData(
         id: 'player_1',
@@ -138,6 +148,7 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
         color: _slotColors[1],
         type: PlayerSlotType.empty,
         teamColor: null,
+        isReady: false,
       ),
       PlayerSlotData(
         id: 'player_2',
@@ -145,6 +156,7 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
         color: _slotColors[2],
         type: PlayerSlotType.empty,
         teamColor: null,
+        isReady: false,
       ),
       PlayerSlotData(
         id: 'player_3',
@@ -152,6 +164,7 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
         color: _slotColors[3],
         type: PlayerSlotType.empty,
         teamColor: null,
+        isReady: false,
       ),
     ];
 
@@ -177,6 +190,12 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
 
   @override
   void dispose() {
+    _netSub?.cancel();
+    _netSub = null;
+    // NOTE: _networkService is intentionally NOT disposed here.
+    // When the game starts, NetworkService is passed to GameScreen
+    // and must remain alive for game state synchronization.
+    // It will be disposed by GameScreen's dispose().
     _startCashCtrl.dispose();
     _passBonusCtrl.dispose();
     _jailTurnsCtrl.dispose();
@@ -242,53 +261,321 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
 
   // ── Hosting actions ───────────────────────────────────────────────────────
 
-  void _startHosting() {
-    // Save network config for the Rust backend
-    _configProvider.updateNetwork(NetworkConfig(
-      host: _localIp,
-      port: _defaultPort,
-    ));
+  Future<void> _startHosting() async {
+    try {
+      _networkService = NetworkService();
+      await _networkService!.startHost(_localIp, _defaultPort);
 
-    setState(() {
-      _isHosting = true;
-      _systemMessages.insert(0, '🚀 已开放大厅到局域网 · $_hostAddress');
-    });
+      _netSub = _networkService!.messages.listen((message) {
+        final type = message['type'] as String?;
+        if (type == 'join') {
+          final playerName =
+              message['player_name'] as String? ?? '远程玩家';
+          final playerId = message['player_id'] as String? ??
+              'remote_${DateTime.now().millisecondsSinceEpoch}';
+
+          setState(() {
+            final emptyIdx =
+                _slots.indexWhere((s) => s.type == PlayerSlotType.empty);
+            if (emptyIdx >= 0) {
+              _slots[emptyIdx] = PlayerSlotData(
+                id: playerId,
+                name: playerName,
+                color: _slotColors[emptyIdx],
+                type: PlayerSlotType.human,
+                teamColor: null,
+                isReady: false,
+              );
+              _systemMessages.insert(0, '$playerName 已通过局域网加入');
+            }
+          });
+
+          // Broadcast updated roster to all connected clients
+          _broadcastRoster();
+        } else if (type == 'request_roster') {
+          // Client requests full roster sync
+          _broadcastRoster();
+        } else if (type == 'leave') {
+          final playerId = message['player_id'] as String?;
+          if (playerId != null) {
+            setState(() {
+              final idx = _slots.indexWhere((s) => s.id == playerId);
+              if (idx >= 0) {
+                final name = _slots[idx].name;
+                _slots[idx] = PlayerSlotData(
+                  id: 'player_$idx',
+                  name: '空闲',
+                  color: _slotColors[idx],
+                  type: PlayerSlotType.empty,
+                  isReady: false,
+                );
+                _systemMessages.insert(0, '$name 已离开');
+              }
+            });
+            // Notify other clients about removal and broadcast updated roster
+            _networkService!.sendMessage({
+              'type': 'player_removed',
+              'player_id': playerId,
+            });
+            _broadcastRoster();
+          }
+        } else if (type == 'ready') {
+          // Client toggles ready/unready state
+          final playerId = message['player_id'] as String?;
+          final ready = message['ready'] as bool? ?? false;
+          if (playerId != null) {
+            setState(() {
+              final idx = _slots.indexWhere((s) => s.id == playerId);
+              if (idx >= 0) {
+                _slots[idx].isReady = ready;
+                final name = _slots[idx].name;
+                _systemMessages.insert(0, '$name ${ready ? '已准备' : '取消准备'}');
+              }
+            });
+            // Broadcast updated roster to all clients to sync ready states
+            _broadcastRoster();
+          }
+        } else if (type == '_client_disconnected') {
+          // Client disconnected abruptly (network failure / crash)
+          final playerId = message['player_id'] as String?;
+          if (playerId != null) {
+            setState(() {
+              final idx = _slots.indexWhere((s) => s.id == playerId);
+              if (idx >= 0) {
+                final name = _slots[idx].name;
+                _slots[idx] = PlayerSlotData(
+                  id: 'player_$idx',
+                  name: '空闲',
+                  color: _slotColors[idx],
+                  type: PlayerSlotType.empty,
+                  isReady: false,
+                );
+                _systemMessages.insert(0, '$name 已断线');
+              }
+            });
+            _networkService!.sendMessage({
+              'type': 'player_removed',
+              'player_id': playerId,
+            });
+            _broadcastRoster();
+          }
+        }
+      });
+
+      // Save network config for the Rust backend
+      _configProvider.updateNetwork(NetworkConfig(
+        host: _localIp,
+        port: _defaultPort,
+      ));
+
+      setState(() {
+        _isHosting = true;
+        _systemMessages.insert(0, '🚀 已开放大厅到局域网 · $_hostAddress');
+      });
+    } catch (e) {
+      setState(() {
+        _systemMessages.insert(0, '⚠️ 启动主机失败: $e');
+      });
+    }
   }
 
   void _stopHosting() {
+    _netSub?.cancel();
+    _netSub = null;
+    _networkService?.dispose();
+    _networkService = null;
+
     setState(() {
       _isHosting = false;
       _systemMessages.insert(0, '已停止托管');
     });
   }
 
+  /// Broadcast the current full roster to all connected clients.
+  /// This is the single source of truth for client-side slot state.
+  Future<void> _broadcastRoster() async {
+    if (!_isHosting || _networkService == null) return;
+    final roster = _slots
+        .where((s) => s.type != PlayerSlotType.empty)
+        .map((s) => {
+              'player_id': s.id,
+              'player_name': s.name,
+              'is_bot': s.type == PlayerSlotType.bot,
+              'is_ready': s.isReady,
+              'slot_index': _slots.indexOf(s),
+            })
+        .toList();
+    await _networkService!.sendMessage({
+      'type': 'roster_sync',
+      'players': roster,
+    });
+  }
+
   // ── Connection actions ────────────────────────────────────────────────────
 
-  void _connectToHost() {
+  Future<void> _connectToHost() async {
     final input = _connectIpCtrl.text.trim();
     // Parse "ip:port" or just "ip"
     final parts = input.split(':');
     final ip = parts[0].trim();
-    final port = parts.length > 1 ? int.tryParse(parts[1].trim()) ?? _defaultPort : _defaultPort;
+    final port =
+        parts.length > 1 ? int.tryParse(parts[1].trim()) ?? _defaultPort : _defaultPort;
 
     if (ip.isEmpty) {
-      _systemMessages.insert(0, '⚠️ 请输入有效的 IP 地址');
+      setState(() {
+        _systemMessages.insert(0, '⚠️ 请输入有效的 IP 地址');
+      });
       return;
     }
 
-    // Save network config
-    _configProvider.updateNetwork(NetworkConfig(
-      host: ip,
-      port: port,
-    ));
+    try {
+      _networkService = NetworkService();
+      await _networkService!.connectToHost(ip, port);
 
-    setState(() {
-      _isConnected = true;
-      _systemMessages.insert(0, '🔗 已连接到 $ip:$port');
-    });
+      _netSub = _networkService!.messages.listen((message) {
+        // Handle messages from host
+        final type = message['type'] as String?;
+        if (type == 'roster_sync') {
+          final players = message['players'] as List<dynamic>?;
+          if (players != null) {
+            setState(() {
+              // Reset all slots to empty
+              for (int i = 0; i < _slots.length; i++) {
+                _slots[i] = PlayerSlotData(
+                  id: 'player_$i',
+                  name: '空闲',
+                  color: _slotColors[i],
+                  type: PlayerSlotType.empty,
+                  isReady: false,
+                );
+              }
+              // Fill in roster data
+              for (final p in players) {
+                final playerId =
+                    p['player_id'] as String? ?? '';
+                final playerName =
+                    p['player_name'] as String? ?? '远程玩家';
+                final isBot = p['is_bot'] as bool? ?? false;
+                final isReady = p['is_ready'] as bool? ?? false;
+                final slotIndex =
+                    p['slot_index'] as int? ?? 0;
+                if (slotIndex >= 0 &&
+                    slotIndex < _slots.length) {
+                  _slots[slotIndex] = PlayerSlotData(
+                    id: playerId,
+                    name: playerName,
+                    color: _slotColors[slotIndex],
+                    type: isBot
+                        ? PlayerSlotType.bot
+                        : PlayerSlotType.human,
+                    teamColor: null,
+                    isReady: isReady,
+                  );
+                }
+              }
+            });
+          }
+        } else if (type == 'player_removed') {
+          final playerId = message['player_id'] as String?;
+          if (playerId != null) {
+            setState(() {
+              final idx =
+                  _slots.indexWhere((s) => s.id == playerId);
+              if (idx >= 0) {
+                final name = _slots[idx].name;
+                _slots[idx] = PlayerSlotData(
+                  id: 'player_$idx',
+                  name: '空闲',
+                  color: _slotColors[idx],
+                  type: PlayerSlotType.empty,
+                  isReady: false,
+                );
+                _systemMessages.insert(0, '$name 已离开');
+              }
+            });
+          }
+        } else if (type == 'game_start') {
+          final initialState = message['state'] as Map<String, dynamic>?;
+          final count = _activePlayerCount;
+          final names = _slots
+              .where((s) => s.type != PlayerSlotType.empty)
+              .map((s) => s.name)
+              .toList();
+          final aiFlags = _slots
+              .where((s) => s.type != PlayerSlotType.empty)
+              .map((s) => s.type == PlayerSlotType.bot)
+              .toList();
+          final teamIds = _slots
+              .where((s) => s.type != PlayerSlotType.empty)
+              .map((s) => s.teamColor != null ? 'team_${_teamColors.indexOf(s.teamColor!)}' : null)
+              .toList();
+          final networkService = _networkService;
+          Navigator.of(context).pushAndRemoveUntil(
+            MaterialPageRoute(
+              builder: (_) => GameScreen(
+                initialPlayerCount: count,
+                playerNames: names,
+                aiFlags: aiFlags,
+                teamIds: teamIds,
+                mapId: widget.mapId,
+                initialState: initialState,
+                networkService: networkService,
+              ),
+            ),
+            (route) => false,
+          );
+        }
+      });
+
+      // Send join message to announce ourselves
+      await _networkService!.sendMessage({
+        'type': 'join',
+        'player_name': '玩家 1',
+        'player_id': 'local_player',
+      });
+
+      // Request full roster from host to sync all players
+      await _networkService!.sendMessage({
+        'type': 'request_roster',
+      });
+
+      // Save network config
+      _configProvider.updateNetwork(NetworkConfig(
+        host: ip,
+        port: port,
+      ));
+
+      setState(() {
+        _isConnected = true;
+        _systemMessages.insert(0, '🔗 已连接到 $ip:$port');
+      });
+    } catch (e) {
+      // Clean up on failure
+      _netSub?.cancel();
+      _netSub = null;
+      _networkService?.dispose();
+      _networkService = null;
+
+      setState(() {
+        _systemMessages.insert(0, '⚠️ 连接失败: $e');
+      });
+    }
   }
 
   void _disconnect() {
+    // Send leave message before disconnecting
+    if (_networkService != null && _isConnected) {
+      _networkService!.sendMessage({
+        'type': 'leave',
+        'player_id': 'local_player',
+      });
+    }
+
+    _netSub?.cancel();
+    _netSub = null;
+    _networkService?.dispose();
+    _networkService = null;
+
     setState(() {
       _isConnected = false;
       _systemMessages.insert(0, '已断开连接');
@@ -300,7 +587,16 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
   int get _activePlayerCount =>
       _slots.where((s) => s.type != PlayerSlotType.empty).length;
 
-  bool get _canStartGame => _activePlayerCount >= 2;
+  bool get _canStartGame => _activePlayerCount >= 1;
+
+  /// Whether all remote human players (non-local, non-bot) are ready.
+  /// Used by the host to decide if the "start game" button is enabled.
+  bool get _allRemotePlayersReady {
+    final remoteHumans = _slots.where(
+      (s) => s.type == PlayerSlotType.human && !s.id.startsWith('player_'),
+    );
+    return remoteHumans.isEmpty || remoteHumans.every((s) => s.isReady);
+  }
 
   // ── Actions ───────────────────────────────────────────────────────────────
 
@@ -334,19 +630,72 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
         .where((s) => s.type != PlayerSlotType.empty)
         .map((s) => s.type == PlayerSlotType.bot)
         .toList();
+    final teamIds = _slots
+        .where((s) => s.type != PlayerSlotType.empty)
+        .map((s) => s.teamColor != null ? 'team_${_teamColors.indexOf(s.teamColor!)}' : null)
+        .toList();
     final count = _activePlayerCount;
+    final networkService = _networkService;
 
-    Navigator.of(context).pushAndRemoveUntil(
-      MaterialPageRoute(
-        builder: (_) => GameScreen(
-          initialPlayerCount: count,
-          playerNames: names,
-          aiFlags: aiFlags,
-          mapId: widget.mapId,
+    if (_lobbyMode == LobbyMode.host && _isHosting && networkService != null) {
+      // ── Host mode: navigate to game screen ─────────────────────────────
+      // GameScreen.initState will broadcast the full game_start message.
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(
+          builder: (_) => GameScreen(
+            initialPlayerCount: count,
+            playerNames: names,
+            aiFlags: aiFlags,
+            teamIds: teamIds,
+            mapId: widget.mapId,
+            networkService: networkService,
+          ),
         ),
-      ),
-      (route) => false,
-    );
+        (route) => false,
+      );
+    } else if (_lobbyMode == LobbyMode.join && _isConnected && networkService != null) {
+      // ── Client mode: wait for game_start from host, then navigate ──────
+      // Replace the roster listener with a game-start listener
+      _netSub?.cancel();
+      _netSub = networkService.messages.listen((message) {
+        final type = message['type'] as String?;
+        if (type == 'game_start') {
+          _netSub?.cancel();
+          _netSub = null;
+          final initialState = message['state'] as Map<String, dynamic>?;
+          Navigator.of(context).pushAndRemoveUntil(
+            MaterialPageRoute(
+              builder: (_) => GameScreen(
+                initialPlayerCount: count,
+                playerNames: names,
+                aiFlags: aiFlags,
+                teamIds: teamIds,
+                mapId: widget.mapId,
+                initialState: initialState,
+                networkService: networkService,
+              ),
+            ),
+            (route) => false,
+          );
+        }
+      });
+      // Notify host that we're ready for the game
+      networkService.sendMessage({'type': 'client_ready'});
+    } else {
+      // ── Offline mode: navigate directly ────────────────────────────────
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(
+          builder: (_) => GameScreen(
+            initialPlayerCount: count,
+            playerNames: names,
+            aiFlags: aiFlags,
+            teamIds: teamIds,
+            mapId: widget.mapId,
+          ),
+        ),
+        (route) => false,
+      );
+    }
   }
 
   void _addBotPlayer() {
@@ -362,8 +711,20 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
           color: _slotColors[emptyIdx],
           type: PlayerSlotType.bot,
           teamColor: null,
+          isReady: false,
         );
         _systemMessages.insert(0, '已添加电脑玩家 $botIndex');
+
+        // Broadcast to connected clients if hosting
+        if (_isHosting && _networkService != null) {
+          _networkService!.sendMessage({
+            'type': 'join',
+            'player_name': '电脑玩家 $botIndex',
+            'player_id': 'player_$emptyIdx',
+            'is_bot': true,
+          });
+          _broadcastRoster();
+        }
       }
     });
   }
@@ -379,8 +740,19 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
           color: _slotColors[index],
           type: PlayerSlotType.human,
           teamColor: null,
+          isReady: false,
         );
         _systemMessages.insert(0, '玩家 ${index + 1} 已加入');
+
+        // Broadcast to connected clients if hosting
+        if (_isHosting && _networkService != null) {
+          _networkService!.sendMessage({
+            'type': 'join',
+            'player_name': '玩家 ${index + 1}',
+            'player_id': 'player_$index',
+          });
+          _broadcastRoster();
+        }
       });
     } else {
       // Open action menu for filled slots
@@ -502,8 +874,18 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
         name: '空闲',
         color: _slotColors[index],
         type: PlayerSlotType.empty,
+        isReady: false,
       );
       _systemMessages.insert(0, '$name 已移除');
+
+      // Broadcast to connected clients if hosting
+      if (_isHosting && _networkService != null) {
+        _networkService!.sendMessage({
+          'type': 'player_removed',
+          'player_id': 'player_$index',
+        });
+        _broadcastRoster();
+      }
     });
   }
 
@@ -1127,197 +1509,217 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
     return GestureDetector(
       onTap: () => _onSlotTap(index),
       onLongPress: () => _onSlotLongPress(index),
-      child: Container(
-        decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.06),
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(
-            color: isEmpty
-                ? Colors.white.withOpacity(0.08)
-                : slot.color.withOpacity(0.35),
-            width: isEmpty ? 1 : 1.5,
+      child: IntrinsicHeight(
+        child: Container(
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.06),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: isEmpty
+                  ? Colors.white.withOpacity(0.08)
+                  : slot.color.withOpacity(0.35),
+              width: isEmpty ? 1 : 1.5,
+            ),
           ),
-        ),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
           child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // Avatar circle with team colour ring
-              Container(
-                width: 40,
-                height: 40,
-                decoration: BoxDecoration(
-                  color: isEmpty
-                      ? Colors.white.withOpacity(0.08)
-                      : slot.color.withOpacity(0.70),
-                  shape: BoxShape.circle,
-                  border: Border.all(
-                    color: isEmpty
-                        ? Colors.white.withOpacity(0.15)
-                        : avatarBorderColor,
-                    width: isEmpty ? 2 : 3,
-                  ),
-                ),
-                child: Center(
-                  child: isEmpty
-                      ? Icon(Icons.add_rounded,
-                          color: Colors.white.withOpacity(0.40), size: 20)
-                      : Text(
-                          slot.name.isNotEmpty ? slot.name[0] : '?',
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                ),
-              ),
-
-              // Team colour selector (2×2 grid, between avatar and name)
-              if (!isEmpty) ...[
-                const SizedBox(width: 8),
-                _buildTeamSelector(index),
-                const SizedBox(width: 8),
-              ] else
-                const SizedBox(width: 12),
-
-              // Name + badge
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      isEmpty ? '点击添加玩家' : slot.name,
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                        color: isEmpty
-                            ? Colors.white.withOpacity(0.35)
-                            : Colors.white,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Row(
-                      children: [
-                        Icon(badgeIcon,
-                            size: 11, color: badgeColor),
-                        const SizedBox(width: 3),
-                        Text(
-                          badgeLabel,
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: badgeColor,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-
-                        // Ping (for network players in host/join mode)
-                        if (!isEmpty && slot.pingMs != null) ...[
-                          const SizedBox(width: 8),
-                          Icon(Icons.signal_cellular_alt_rounded,
-                              size: 10,
-                              color: _pingColor(slot.pingMs!)),
-                          const SizedBox(width: 2),
-                          Text(
-                            '${slot.pingMs}ms',
-                            style: TextStyle(
-                              fontSize: 9,
-                              color: Colors.white.withOpacity(0.35),
-                            ),
-                          ),
-                        ],
-
-                        // Ready status for non-empty slots
-                        if (!isEmpty) ...[
-                          const SizedBox(width: 8),
-                          Container(
-                            width: 6,
-                            height: 6,
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF43A047),
-                              shape: BoxShape.circle,
-                            ),
-                          ),
-                          const SizedBox(width: 3),
-                          Text(
-                            '已准备',
-                            style: TextStyle(
-                              fontSize: 10,
-                              color: Colors.white.withOpacity(0.40),
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-
-              // Slot number + delete button
-              if (isEmpty)
+              // Green left vertical bar for ready non-empty slots
+              if (!isEmpty && slot.isReady)
                 Container(
-                  width: 26,
-                  height: 26,
+                  width: 3,
                   decoration: BoxDecoration(
-                    color: slot.color.withOpacity(0.15),
-                    shape: BoxShape.circle,
+                    color: const Color(0xFF43A047),
+                    borderRadius: BorderRadius.circular(2),
                   ),
-                  child: Center(
-                    child: Text(
-                      '${index + 1}',
-                      style: TextStyle(
-                        color: slot.color.withOpacity(0.70),
-                        fontWeight: FontWeight.bold,
-                        fontSize: 12,
-                      ),
-                    ),
-                  ),
-                )
-              else
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // Slot number badge
-                    Container(
-                      width: 26,
-                      height: 26,
-                      decoration: BoxDecoration(
-                        color: slot.color.withOpacity(0.15),
-                        shape: BoxShape.circle,
-                      ),
-                      child: Center(
-                        child: Text(
-                          '${index + 1}',
-                          style: TextStyle(
-                            color: slot.color.withOpacity(0.70),
-                            fontWeight: FontWeight.bold,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                    // Delete (remove) button — only shown for non-empty slots
-                    GestureDetector(
-                      onTap: () => _removeSlot(index),
-                      child: Container(
-                        width: 26,
-                        height: 26,
+                ),
+
+              // Original content
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                  child: Row(
+                    children: [
+                      // Avatar circle with team colour ring
+                      Container(
+                        width: 40,
+                        height: 40,
                         decoration: BoxDecoration(
-                          color: Colors.red.withOpacity(0.15),
+                          color: isEmpty
+                              ? Colors.white.withOpacity(0.08)
+                              : slot.color.withOpacity(0.70),
                           shape: BoxShape.circle,
+                          border: Border.all(
+                            color: isEmpty
+                                ? Colors.white.withOpacity(0.15)
+                                : avatarBorderColor,
+                            width: isEmpty ? 2 : 3,
+                          ),
                         ),
                         child: Center(
-                          child: Icon(
-                            Icons.close_rounded,
-                            color: Colors.red.shade300,
-                            size: 16,
-                          ),
+                          child: isEmpty
+                              ? Icon(Icons.add_rounded,
+                                  color: Colors.white.withOpacity(0.40), size: 20)
+                              : Text(
+                                  slot.name.isNotEmpty ? slot.name[0] : '?',
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
                         ),
                       ),
-                    ),
-                  ],
+
+                      // Team colour selector (2×2 grid, between avatar and name)
+                      if (!isEmpty) ...[
+                        const SizedBox(width: 8),
+                        _buildTeamSelector(index),
+                        const SizedBox(width: 8),
+                      ] else
+                        const SizedBox(width: 12),
+
+                      // Name + badge
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              isEmpty ? '点击添加玩家' : slot.name,
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
+                                color: isEmpty
+                                    ? Colors.white.withOpacity(0.35)
+                                    : Colors.white,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Row(
+                              children: [
+                                Icon(badgeIcon,
+                                    size: 11, color: badgeColor),
+                                const SizedBox(width: 3),
+                                Text(
+                                  badgeLabel,
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    color: badgeColor,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+
+                                // Ping (for network players in host/join mode)
+                                if (!isEmpty && slot.pingMs != null) ...[
+                                  const SizedBox(width: 8),
+                                  Icon(Icons.signal_cellular_alt_rounded,
+                                      size: 10,
+                                      color: _pingColor(slot.pingMs!)),
+                                  const SizedBox(width: 2),
+                                  Text(
+                                    '${slot.pingMs}ms',
+                                    style: TextStyle(
+                                      fontSize: 9,
+                                      color: Colors.white.withOpacity(0.35),
+                                    ),
+                                  ),
+                                ],
+
+                                // Ready status indicator (only for ready slots)
+                                if (!isEmpty && slot.isReady) ...[
+                                  const SizedBox(width: 8),
+                                  Container(
+                                    width: 6,
+                                    height: 6,
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFF43A047),
+                                      shape: BoxShape.circle,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 3),
+                                  Text(
+                                    '已准备',
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      color: Colors.white.withOpacity(0.40),
+                                    ),
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+
+                      // Slot number + delete button
+                      if (isEmpty)
+                        Container(
+                          width: 26,
+                          height: 26,
+                          decoration: BoxDecoration(
+                            color: slot.color.withOpacity(0.15),
+                            shape: BoxShape.circle,
+                          ),
+                          child: Center(
+                            child: Text(
+                              '${index + 1}',
+                              style: TextStyle(
+                                color: slot.color.withOpacity(0.70),
+                                fontWeight: FontWeight.bold,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                        )
+                      else
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            // Slot number badge
+                            Container(
+                              width: 26,
+                              height: 26,
+                              decoration: BoxDecoration(
+                                color: slot.color.withOpacity(0.15),
+                                shape: BoxShape.circle,
+                              ),
+                              child: Center(
+                                child: Text(
+                                  '${index + 1}',
+                                  style: TextStyle(
+                                    color: slot.color.withOpacity(0.70),
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            // Delete (remove) button — only shown for non-empty slots
+                            GestureDetector(
+                              onTap: () => _removeSlot(index),
+                              child: Container(
+                                width: 26,
+                                height: 26,
+                                decoration: BoxDecoration(
+                                  color: Colors.red.withOpacity(0.15),
+                                  shape: BoxShape.circle,
+                                ),
+                                child: Center(
+                                  child: Icon(
+                                    Icons.close_rounded,
+                                    color: Colors.red.shade300,
+                                    size: 16,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                    ],
+                  ),
                 ),
+              ),
             ],
           ),
         ),
@@ -1685,33 +2087,97 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
               ),
               if (isWide) const SizedBox(width: 12),
 
-              // Start game button (right side)
+              // Action button (right side)
               const SizedBox(width: 12),
-              FilledButton.icon(
-                onPressed: _canStartGame ? _onStartGame : null,
-                icon: const Icon(Icons.play_arrow_rounded, size: 20),
-                label: Text(
-                  _canStartGame ? '开始游戏' : '至少需要 2 名玩家',
-                  style: const TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                style: FilledButton.styleFrom(
-                  backgroundColor: const Color(0xFF43A047),
-                  disabledBackgroundColor: Colors.white.withOpacity(0.10),
-                  disabledForegroundColor: Colors.white.withOpacity(0.30),
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 24, vertical: 14),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                ),
-              ),
+              if (_lobbyMode == LobbyMode.join && _isConnected)
+                // ── Ready / Unready toggle (client mode) ────────────────
+                _buildReadyToggleButton()
+              else
+                // ── Start Game button (host / offline mode) ─────────────
+                _buildStartGameButton(),
             ],
           );
         },
+      ),
+    );
+  }
+
+  /// Build the ready/unready toggle button shown in join (client) mode.
+  Widget _buildReadyToggleButton() {
+    // Find the local player's slot (id == 'local_player')
+    final localSlotIdx = _slots.indexWhere((s) => s.id == 'local_player');
+    final isReady =
+        localSlotIdx >= 0 ? _slots[localSlotIdx].isReady : false;
+
+    return FilledButton.icon(
+      onPressed: () {
+        if (localSlotIdx < 0 || _networkService == null) return;
+        final newReady = !_slots[localSlotIdx].isReady;
+        setState(() {
+          _slots[localSlotIdx].isReady = newReady;
+          _systemMessages.insert(0, newReady ? '你已准备' : '你已取消准备');
+        });
+        _networkService!.sendMessage({
+          'type': 'ready',
+          'player_id': 'local_player',
+          'ready': newReady,
+        });
+      },
+      icon: Icon(
+        isReady ? Icons.close_rounded : Icons.check_rounded,
+        size: 20,
+      ),
+      label: Text(
+        isReady ? '取消准备' : '准备',
+        style: const TextStyle(
+          fontSize: 14,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+      style: FilledButton.styleFrom(
+        backgroundColor:
+            isReady ? const Color(0xFFE53935) : const Color(0xFF43A047),
+        disabledBackgroundColor: Colors.white.withOpacity(0.10),
+        disabledForegroundColor: Colors.white.withOpacity(0.30),
+        foregroundColor: Colors.white,
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(14),
+        ),
+      ),
+    );
+  }
+
+  /// Build the "Start Game" button for host or offline mode.
+  /// In host mode the button is only enabled when all remote human players
+  /// have signalled ready via [_allRemotePlayersReady].
+  Widget _buildStartGameButton() {
+    final isHost = _lobbyMode == LobbyMode.host && _isHosting;
+    final canStart = _canStartGame && (isHost ? _allRemotePlayersReady : true);
+
+    return FilledButton.icon(
+      onPressed: canStart ? _onStartGame : null,
+      icon: const Icon(Icons.play_arrow_rounded, size: 20),
+      label: Text(
+        !_canStartGame
+            ? '至少需要 1 名玩家'
+            : (isHost && !_allRemotePlayersReady
+                ? '等待玩家准备...'
+                : '开始游戏'),
+        style: const TextStyle(
+          fontSize: 14,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+      style: FilledButton.styleFrom(
+        backgroundColor: const Color(0xFF43A047),
+        disabledBackgroundColor: Colors.white.withOpacity(0.10),
+        disabledForegroundColor: Colors.white.withOpacity(0.30),
+        foregroundColor: Colors.white,
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(14),
+        ),
       ),
     );
   }

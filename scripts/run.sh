@@ -81,6 +81,10 @@ if [ -z "$FLUTTER_MODE" ]; then
 fi
 
 cd "$FLUTTER_DIR"
+# Prepend ~/bin to PATH so that clang/clang++ → gcc/g++ (Flutter
+# Linux build hardcodes CC=clang CXX=clang++; these wrappers redirect
+# to gcc/g++ when clang is not natively installed).
+export PATH="$HOME/bin:$PATH"
 # shellcheck disable=SC2086
 env $CC_FLAGS flutter run $RUN_FLAGS
 

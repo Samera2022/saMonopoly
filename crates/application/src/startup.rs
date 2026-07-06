@@ -26,6 +26,7 @@ impl GameBootstrap {
                 hospital_turns: 0,
                 owned_cards: vec![],
                 stock_shares: 0,
+                team_id: None,
             }],
             ruleset: RuleSetRef {
                 id: "classic".to_string(),

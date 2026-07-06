@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
@@ -5,6 +6,7 @@ import 'package:flutter/material.dart';
 
 import 'board_view.dart';
 import 'home_screen.dart';
+import 'network_service.dart';
 import 'save_manager.dart';
 import 'save_manager.dart';
 import 'bridge_client.dart';
@@ -116,20 +118,27 @@ class GameScreen extends StatefulWidget {
   final int? initialPlayerCount;
   final List<String>? playerNames;
   final List<bool>? aiFlags;
+  /// Team ID for each player (null = no team). Indexed as 'team_0'..'team_3'.
+  final List<String?>? teamIds;
   /// Map ID from the map selection screen. When 'classic', uses the 40-tile
   /// classic board; otherwise falls through to the complex/L-shaped board.
   final String? mapId;
   /// Raw game state to load from a save file. When set, this state is used
   /// directly instead of building a fresh initial state.
   final Map<String, dynamic>? initialState;
+  /// Network service for host/client game synchronization.
+  /// When non-null, the game runs in networked mode.
+  final NetworkService? networkService;
 
   const GameScreen({
     super.key,
     this.initialPlayerCount,
     this.playerNames,
     this.aiFlags,
+    this.teamIds,
     this.mapId,
     this.initialState,
+    this.networkService,
   });
 
   @override
@@ -140,6 +149,10 @@ class _GameScreenState extends State<GameScreen> {
   final BridgeClient _bridgeClient = BridgeClient();
   final ContentPackLoader _loader = const ContentPackLoader();
   final ScrollController _logScrollController = ScrollController();
+
+  // ---- Network state -------------------------------------------------------
+  NetworkService? _networkService;
+  StreamSubscription<Map<String, dynamic>>? _netGameSub;
 
   // ---- Game state ----------------------------------------------------------
   GameStateData _gameState = const GameStateData();
@@ -155,6 +168,11 @@ class _GameScreenState extends State<GameScreen> {
   bool _isRollingDice = false;
   int _animDice1 = 1;
   int _animDice2 = 1;
+
+  /// Persists the last dice result across state rebuilds.
+  /// Set after a successful roll, cleared on End Turn.
+  /// Ensures dice values remain visible until the turn advances.
+  Map<String, int> _lastDiceResult = {};
 
   // ---- Config provider -----------------------------------------------------
   final ConfigProvider _configProvider = ConfigProvider();
@@ -172,6 +190,22 @@ class _GameScreenState extends State<GameScreen> {
   /// When non-null, the property detail overlay is shown for this tile.
   /// Using state-based overlay instead of showDialog for instant response.
   String? _detailTileId;
+
+  /// Whether the current active player is controlled by this client.
+  ///
+  /// - **Offline**: always `true` (no restrictions).
+  /// - **Host**: controls player_0 (`activePlayerIndex == 0`).
+  /// - **Client**: controls any other player (`activePlayerIndex > 0`).
+  bool get _isLocalPlayersTurn {
+    if (_networkService == null) return true; // Offline mode: no restriction
+    if (_networkService!.isHost) {
+      // Host controls player_0
+      return _gameState.activePlayerIndex == 0;
+    } else {
+      // Client controls other players
+      return _gameState.activePlayerIndex > 0;
+    }
+  }
 
   // Player colours
   static const List<Color> _playerColors = [
@@ -312,6 +346,68 @@ class _GameScreenState extends State<GameScreen> {
     // the complex L-shaped test board for development/testing.
     _useComplexBoard = widget.mapId != 'classic';
 
+    _networkService = widget.networkService;
+
+    // ────────────────────────────────────────────────────────────────────────
+    // Network mode: host or client
+    // ────────────────────────────────────────────────────────────────────────
+    if (widget.networkService != null) {
+      final net = widget.networkService!;
+
+      // Subscribe to network messages
+      _netGameSub = net.messages.listen(_onNetworkMessage);
+
+      if (net.isHost) {
+        // ── Host: build state locally, broadcast game_start ────────────
+        if (widget.initialState != null) {
+          _currentState = Map<String, dynamic>.from(widget.initialState!);
+        } else {
+          final playerCount = widget.initialPlayerCount ?? 2;
+          _currentState = _buildInitialState(playerCount, teamIds: widget.teamIds);
+
+          if (widget.playerNames != null || widget.aiFlags != null) {
+            final players = _currentState['players'] as List<Map<String, dynamic>>;
+            for (var i = 0; i < players.length && i < playerCount; i++) {
+              if (widget.playerNames != null && i < widget.playerNames!.length) {
+                players[i]['name'] = widget.playerNames![i];
+              }
+              if (widget.aiFlags != null && i < widget.aiFlags!.length) {
+                players[i]['is_ai'] = widget.aiFlags![i];
+              }
+            }
+            _currentState['players'] = players;
+          }
+        }
+        _gameState = _buildGameState(_currentState, lastEvent: 'Game started (host)');
+        _landedTileIdThisTurn = null;
+        _addLog('Game started (host mode)');
+
+        // Broadcast initial state to all connected clients
+        net.sendMessage({
+          'type': 'game_start',
+          'state': _currentState,
+        });
+      } else {
+        // ── Client: wait for game_start from host ──────────────────────
+        _landedTileIdThisTurn = null;
+        if (widget.initialState != null) {
+          // State was already provided via game_start message from lobby
+          _currentState = Map<String, dynamic>.from(widget.initialState!);
+          _gameState = _buildGameState(_currentState, lastEvent: 'Game started (client)');
+          _addLog('Game started (client mode)');
+        } else {
+          // State will arrive via game_start message on the network stream
+          _currentState = {};
+          _gameState = const GameStateData();
+          _addLog('Waiting for host to start game...');
+        }
+      }
+      return;
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // Offline mode (original logic)
+    // ────────────────────────────────────────────────────────────────────────
     if (widget.initialState != null) {
       // ── Load from save ──────────────────────────────────────────────
       _currentState = Map<String, dynamic>.from(widget.initialState!);
@@ -322,7 +418,7 @@ class _GameScreenState extends State<GameScreen> {
     } else {
       // ── Fresh game ──────────────────────────────────────────────────
       final playerCount = widget.initialPlayerCount ?? 2;
-      _currentState = _buildInitialState(playerCount);
+      _currentState = _buildInitialState(playerCount, teamIds: widget.teamIds);
       _gameState = _buildGameState(_currentState);
       _landedTileIdThisTurn = null;
 
@@ -346,8 +442,287 @@ class _GameScreenState extends State<GameScreen> {
     }
   }
 
+  /// Handle incoming network messages.
+  void _onNetworkMessage(Map<String, dynamic> message) {
+    final type = message['type'] as String?;
+    final isHost = _networkService?.isHost ?? false;
+    switch (type) {
+      // ── Two-phase roll animation protocol ──────────────────────────────
+      case 'roll_start':
+        if (isHost) {
+          if (!_isRollingDice) _handleRemoteRollStart();
+          _networkService?.sendMessage(message);
+        } else {
+          if (!_isRollingDice) _handleRemoteRollStart();
+        }
+        break;
+
+      case 'roll_end':
+        final dice1 = (message['dice1'] as num?)?.toInt() ?? 0;
+        final dice2 = (message['dice2'] as num?)?.toInt() ?? 0;
+        final state = message['state'] as Map<String, dynamic>?;
+        final event = message['event'] as Map<String, dynamic>?;
+        if (state != null) {
+          if (isHost) {
+            _handleRemoteRollEnd(dice1, dice2, state, event);
+            _networkService?.sendMessage(message);
+          } else {
+            _handleRemoteRollEnd(dice1, dice2, state, event);
+          }
+        }
+        break;
+
+      // ── Two-phase movement animation protocol ──────────────────────────
+      case 'move_start':
+        final playerIdx = message['player_index'] as int? ?? 0;
+        final tilePath = message['tile_path'] as List<dynamic>? ?? [];
+        if (tilePath.isNotEmpty) {
+          if (isHost) {
+            _handleRemoteMoveStart(playerIdx, tilePath);
+            _networkService?.sendMessage(message);
+          } else {
+            // Skip rebroadcast echo if we are the roller (already animating)
+            if (!_isAnimating) {
+              _handleRemoteMoveStart(playerIdx, tilePath);
+            }
+          }
+        }
+        break;
+
+      case 'move_end':
+        final moveState = message['state'] as Map<String, dynamic>?;
+        // Both host and client: finalize movement (clear animation flags).
+        // Host additionally rebroadcasts to other clients.
+        _handleRemoteMoveEnd(moveState);
+        if (isHost) {
+          _networkService?.sendMessage(message);
+        }
+        break;
+
+      // ── State sync for non-roll actions ────────────────────────────────
+      case 'state_sync':
+        final state = message['state'] as Map<String, dynamic>?;
+        final event = message['event'] as Map<String, dynamic>?;
+        if (state != null) {
+          debugPrint('[NetSync] Received state_sync (isHost: $isHost)');
+
+          if (isHost) {
+            // ── Host received state from a client ─────────────────────
+            setState(() {
+              _currentState = state;
+              _gameState = _buildGameState(state, lastEvent: 'State synced');
+            });
+            // Rebroadcast to all other clients
+            _networkService?.sendMessage({
+              'type': 'state_sync',
+              'state': state,
+              'event': event,
+            });
+          } else {
+            // ── Client received state from host ───────────────────────
+            // Note: dice rolls use roll_start/roll_end protocol; state_sync
+            // here only carries non-roll updates (EndTurn, BuyProperty, etc.)
+            setState(() {
+              _currentState = state;
+              _gameState = _buildGameState(state, lastEvent: 'State synced');
+            });
+          }
+        } else {
+          debugPrint('[NetSync] state_sync with null state');
+        }
+        break;
+
+      case 'game_start':
+        final state = message['state'] as Map<String, dynamic>?;
+        if (state != null && mounted) {
+          setState(() {
+            _currentState = state;
+            _gameState = _buildGameState(state, lastEvent: 'Game started (client)');
+          });
+          _addLog('Game started via network');
+        }
+        break;
+    }
+  }
+
+  // ── Two-phase roll animation helpers ─────────────────────────────────────
+
+  /// Broadcast that a dice roll animation has started.
+  void _broadcastRollStart() {
+    final net = widget.networkService;
+    if (net == null || !mounted) return;
+    net.sendMessage({
+      'type': 'roll_start',
+      'player_index': _gameState.activePlayerIndex,
+    });
+  }
+
+  /// Broadcast the final dice result after animation completes.
+  void _broadcastRollEnd(int dice1, int dice2, BridgeResponse response) {
+    final net = widget.networkService;
+    if (net == null || !mounted) return;
+    net.sendMessage({
+      'type': 'roll_end',
+      'dice1': dice1,
+      'dice2': dice2,
+      'state': response.state,
+      'event': response.event,
+    });
+  }
+
+  /// Start dice animation on this client (called when roll_start arrives).
+  void _handleRemoteRollStart() {
+    if (!mounted) return;
+    setState(() {
+      _isRollingDice = true;
+      _isAnimating = true;
+    });
+    // Run a continuous animation loop until roll_end arrives
+    _runRemoteDiceAnimation();
+  }
+
+  /// Continuously animate dice face values until roll_end stops it.
+  Future<void> _runRemoteDiceAnimation() async {
+    var frame = 0;
+    while (_isRollingDice && mounted) {
+      await Future.delayed(const Duration(milliseconds: 80));
+      if (!mounted || !_isRollingDice) return;
+      setState(() {
+        _animDice1 = 1 + (frame * 3 + 1) % 6;
+        _animDice2 = 1 + (frame * 7 + 3) % 6;
+      });
+      frame++;
+    }
+  }
+
+  /// Show final dice result + apply state (called when roll_end arrives).
+  /// Clears animation flags; move_start (if any) will re-set them.
+  ///
+  /// IMPORTANT: The roll state has the player at the *destination* tile.
+  /// We override the token position back to the pre-roll position so it
+  /// doesn't visually snap to the target before the movement animation.
+  void _handleRemoteRollEnd(
+      int dice1, int dice2, Map<String, dynamic> state, Map<String, dynamic>? event) {
+    if (!mounted) return;
+    _lastDiceResult = {'dice1': dice1, 'dice2': dice2};
+
+    // Keep the active player's token at the pre-roll position until
+    // move_start begins the hop animation.
+    final activeIdx = (state['active_player_index'] as num?)?.toInt() ?? 0;
+    final preRollPos = _gameState.players.isNotEmpty &&
+            activeIdx < _gameState.players.length
+        ? _gameState.players[activeIdx].tileId
+        : null;
+    final overrides = preRollPos != null
+        ? {activeIdx: preRollPos}
+        : <int, String>{};
+
+    setState(() {
+      _animDice1 = dice1;
+      _animDice2 = dice2;
+      _currentState = state;
+      _gameState = _buildGameState(
+        state,
+        lastEvent: 'Rolled $dice1 + $dice2',
+        diceResult: {'dice1': dice1, 'dice2': dice2},
+        positionOverrides: overrides,
+      );
+      _isRollingDice = false;
+      _isAnimating = false; // cleared here; move_start re-sets if movement follows
+    });
+  }
+
+  // ── Two-phase movement animation protocol ────────────────────────────────
+  // move_start → all clients begin token hop animation through the tile path
+  // move_end   → all clients snap token to final position
+
+  /// Broadcast that the active player's token has started moving.
+  void _broadcastMoveStart(int playerIndex, List<String> tilePath) {
+    final net = widget.networkService;
+    if (net == null || !mounted) return;
+    net.sendMessage({
+      'type': 'move_start',
+      'player_index': playerIndex,
+      'tile_path': tilePath,
+    });
+  }
+
+  /// Broadcast that the token has finished moving.
+  void _broadcastMoveEnd() {
+    final net = widget.networkService;
+    if (net == null || !mounted) return;
+    net.sendMessage({
+      'type': 'move_end',
+      'state': _currentState,
+    });
+  }
+
+  /// Animate token hopping on a remote client (called when move_start arrives).
+  Future<void> _handleRemoteMoveStart(
+      int playerIndex, List<dynamic> tilePath) async {
+    if (!mounted || tilePath.isEmpty) return;
+    for (var i = 0; i < tilePath.length; i++) {
+      await Future.delayed(const Duration(milliseconds: 150));
+      if (!mounted) return;
+      setState(() {
+        _animatedPositions[playerIndex] = tilePath[i] as String;
+        _gameState = _buildGameState(
+          _currentState,
+          lastEvent: 'Token moving…',
+          positionOverrides: Map.of(_animatedPositions),
+        );
+      });
+    }
+    // Keep _isAnimating true until move_end clears it
+  }
+
+  /// Finalize movement on a remote client (called when move_end arrives).
+  void _handleRemoteMoveEnd(Map<String, dynamic>? state) {
+    if (!mounted) return;
+    setState(() {
+      if (state != null) {
+        _currentState = state;
+        _gameState = _buildGameState(state, lastEvent: 'Movement done');
+      }
+      _animatedPositions.clear();
+      _isAnimating = false;
+    });
+  }
+
+  /// After executing a game action, sync the resulting state to network peers.
+  ///
+  /// - **Host**: broadcasts to all connected clients.
+  /// - **Client**: sends state to the host, which updates itself and rebroadcasts
+  ///   to all other clients.
+  ///
+  /// This ensures every node in the session sees the same authoritative state.
+  void _syncAfterAction(BridgeResponse response) {
+    final net = widget.networkService;
+    if (net == null || !mounted) return;
+    debugPrint('[NetSync] Syncing after action (isHost: ${net.isHost})');
+    net.sendMessage({
+      'type': 'state_sync',
+      'state': response.state,
+      'event': response.event,
+    });
+  }
+
+  /// Sync the current local state to network peers without a BridgeResponse.
+  /// Used after tile-effect resolution that modifies state directly in Dart.
+  void _syncCurrentState({String eventType = 'TileEffect'}) {
+    final net = widget.networkService;
+    if (net == null || !mounted) return;
+    net.sendMessage({
+      'type': 'state_sync',
+      'state': _currentState,
+      'event': {'event_type': eventType},
+    });
+  }
+
   @override
   void dispose() {
+    _netGameSub?.cancel();
+    _networkService?.dispose();
     _logScrollController.dispose();
     super.dispose();
   }
@@ -355,7 +730,8 @@ class _GameScreenState extends State<GameScreen> {
   // ---- State builders ------------------------------------------------------
 
   /// Build the initial GameState JSON map for [numPlayers] players.
-  Map<String, dynamic> _buildInitialState(int numPlayers) {
+  /// [teamIds] assigns each player to a team (null = no team).
+  Map<String, dynamic> _buildInitialState(int numPlayers, {List<String?>? teamIds}) {
     // Pick tile source: complex or classic
     final tileSource = _useComplexBoard ? _complexTiles : _defaultTiles;
     final tiles = tileSource
@@ -381,6 +757,7 @@ class _GameScreenState extends State<GameScreen> {
         'hospital_turns': 0,
         'owned_cards': <String>[],
         'stock_shares': 0,
+        'team_id': teamIds != null && i < teamIds.length ? teamIds[i] : null,
       },
     );
 
@@ -681,6 +1058,16 @@ class _GameScreenState extends State<GameScreen> {
   // ---- Game actions --------------------------------------------------------
 
   Future<void> _onRoll() async {
+    // 1. Broadcast roll_start to all peers immediately
+    _broadcastRollStart();
+
+    // 2. Start local dice animation (shows random faces until roll_end)
+    setState(() {
+      _isRollingDice = true;
+      _isAnimating = true;
+    });
+
+    // 3. Execute FFI command to get authoritative dice values
     final response = await _bridgeClient.executeCommand(
       command: BridgeCommand.roll(),
       currentState: _currentState,
@@ -698,14 +1085,16 @@ class _GameScreenState extends State<GameScreen> {
             response.state,
             lastEvent: 'In hospital (skip turn)',
           );
+          _isRollingDice = false;
+          _isAnimating = false;
         });
+        _broadcastRollEnd(0, 0, response);
         _addLog('In hospital — turn skipped');
         return;
       }
     }
 
-    // Read dice values from the response event (engine always generates
-    // them now — even when in jail).
+    // Read dice values from the response event
     final dice1 = (response.event['dice1'] as num?)?.toInt() ?? 0;
     final dice2 = (response.event['dice2'] as num?)?.toInt() ?? 0;
     final steps = dice1 + dice2;
@@ -717,8 +1106,7 @@ class _GameScreenState extends State<GameScreen> {
     final isJailReleased = eventType == 'PlayerReleasedFromJail';
     final isJailRoll = isJailStillLocked || isJailReleased;
 
-    // ---- Dice rolling animation ------------------------------------------
-    _isRollingDice = true;
+    // 4. Continue dice animation with known values (total ~8 frames)
     for (var i = 0; i < 8; i++) {
       await Future.delayed(const Duration(milliseconds: 60));
       if (!mounted) return;
@@ -727,72 +1115,87 @@ class _GameScreenState extends State<GameScreen> {
         _animDice2 = 1 + (i * 7 + 3) % 6;
       });
     }
-    // Show final dice values
+
+    // 5. Show final dice values briefly before applying state
     setState(() {
       _animDice1 = dice1;
       _animDice2 = dice2;
-      _isRollingDice = false;
     });
+    await Future.delayed(const Duration(milliseconds: 400));
+    if (!mounted) return;
 
-    // Compute the animation path (intermediate tile IDs).
-    // When stuck in jail (failed roll), no movement occurs.
-    final rawTiles = (_currentState['board'] as Map<String, dynamic>?)?
-        ['tiles'] as List<dynamic>? ?? [];
+    // 6. Broadcast roll_end with the authoritative result
+    _broadcastRollEnd(dice1, dice2, response);
+
+    // 7. Apply final state locally (position already updated by engine).
+    //    Override the token position back to pre-roll so it doesn't
+    //    visually snap to the destination before the hop animation.
     final activeIdx = _gameState.activePlayerIndex;
     final currentPos = _gameState.players[activeIdx].tileId;
+    final rawTiles = (_currentState['board'] as Map<String, dynamic>?)?
+        ['tiles'] as List<dynamic>? ?? [];
     final currentTileIdx = rawTiles.indexWhere((t) => t['id'] == currentPos);
 
-    final path = <String>[];
+    final movementPath = <String>[];
     if (!isJailRoll && rawTiles.isNotEmpty) {
       for (var i = 1; i <= steps; i++) {
         final idx = (currentTileIdx + i) % rawTiles.length;
-        path.add(rawTiles[idx]['id'] as String);
+        movementPath.add(rawTiles[idx]['id'] as String);
       }
     }
 
-    // Animate: hop through each intermediate tile
-    if (path.isNotEmpty) {
-      _isAnimating = true;
-      for (var i = 0; i < path.length; i++) {
-        await Future.delayed(const Duration(milliseconds: 150));
-        if (!mounted) return;
-        setState(() {
-          _animatedPositions[activeIdx] = path[i];
-          _gameState = _buildGameState(
-            _currentState,
-            lastEvent: 'Rolled $dice1 + $dice2',
-            diceResult: {'dice1': dice1, 'dice2': dice2},
-            positionOverrides: Map.of(_animatedPositions),
-          );
-        });
-      }
-      _isAnimating = false;
-      _animatedPositions.clear();
-    }
-
-    // Apply final state from the engine
     final jailMsg = isJailStillLocked
         ? ' (jail — need 7)'
         : isJailReleased
             ? ' (released from jail!)'
             : '';
+    _lastDiceResult = {'dice1': dice1, 'dice2': dice2};
     setState(() {
       _currentState = response.state;
       _gameState = _buildGameState(
         response.state,
         lastEvent: 'Rolled $dice1 + $dice2${isJailRoll ? '\n$jailMsg' : ''}',
         diceResult: {'dice1': dice1, 'dice2': dice2},
+        positionOverrides: {activeIdx: currentPos},
       );
+      _isRollingDice = false;
+      // Keep _isAnimating for the movement phase below
     });
     _addLog('Rolled $dice1 + $dice2 = ${dice1 + dice2}$jailMsg');
 
-    // Skip tile effect resolution when stuck in jail (player didn't move).
-    if (isJailRoll) return;
+    // Skip tile effect + movement when stuck in jail (player didn't move).
+    if (isJailRoll) {
+      _isAnimating = false;
+      return;
+    }
 
-    // Resolve special tile effects
+    // ── 8. Movement animation (two-phase: move_start → hop → move_end) ──────
+    if (movementPath.isNotEmpty) {
+      _broadcastMoveStart(activeIdx, movementPath);
+      _isAnimating = true;
+      for (var i = 0; i < movementPath.length; i++) {
+        await Future.delayed(const Duration(milliseconds: 150));
+        if (!mounted) return;
+        setState(() {
+          _animatedPositions[activeIdx] = movementPath[i];
+          _gameState = _buildGameState(
+            _currentState,
+            positionOverrides: Map.of(_animatedPositions),
+          );
+        });
+      }
+      _animatedPositions.clear();
+      _broadcastMoveEnd();
+    }
+    _isAnimating = false;
+    setState(() {}); // refresh UI after animating
+
+    // 9. Resolve special tile effects
     final playerPos =
         _currentState['players'][_gameState.activePlayerIndex]['position'];
     await _resolveTileEffect(playerPos);
+    // Sync tile-effect changes (tax, chance card, jail, etc.) to peers
+    _syncCurrentState(eventType: 'TileEffect');
 
     // Record which tile the player just landed on (buy/upgrade only allowed
     // on the turn they first arrive).
@@ -893,21 +1296,22 @@ class _GameScreenState extends State<GameScreen> {
       command: BridgeCommand.buyCard(cardId, price),
       currentState: _currentState,
     );
+    final eventType = response.event['event_type'] as String? ?? '';
+    final accepted = eventType == 'CardBought';
     setState(() {
       _currentState = response.state;
-      final eventType = response.event['event_type'] as String? ?? '';
-      final accepted = eventType == 'CardBought';
       _gameState = _buildGameState(
         response.state,
-        lastEvent: accepted ? 'Bought ${cardId}' : 'Purchase rejected',
+        lastEvent: accepted ? 'Bought $cardId' : 'Purchase rejected',
       );
-      if (accepted) {
-        _addLog('Bought card: $cardId');
-      } else {
-        final reason = response.event['reason'] as String? ?? 'unknown';
-        _addLog('Card purchase rejected: $reason');
-      }
     });
+    _syncAfterAction(response);
+    if (accepted) {
+      _addLog('Bought card: $cardId');
+    } else {
+      final reason = response.event['reason'] as String? ?? 'unknown';
+      _addLog('Card purchase rejected: $reason');
+    }
   }
 
   Future<void> _onUseCard(String cardId) async {
@@ -919,6 +1323,7 @@ class _GameScreenState extends State<GameScreen> {
       _currentState = response.state;
       _gameState = _buildGameState(response.state, lastEvent: 'Used $cardId');
     });
+    _syncAfterAction(response);
     _addLog('Used card: $cardId');
   }
 
@@ -933,6 +1338,7 @@ class _GameScreenState extends State<GameScreen> {
       _gameState =
           _buildGameState(response.state, lastEvent: 'Lottery #$number');
     });
+    _syncAfterAction(response);
     _addLog('Bought lottery ticket #$number');
   }
 
@@ -1144,6 +1550,7 @@ class _GameScreenState extends State<GameScreen> {
       command: BridgeCommand.endTurn(),
       currentState: _currentState,
     );
+    _lastDiceResult = {}; // Clear dice display on turn end
     setState(() {
       _currentState = response.state;
       _gameState = _buildGameState(
@@ -1153,6 +1560,7 @@ class _GameScreenState extends State<GameScreen> {
       _rollsRemainingThisTurn = 1;
       _landedTileIdThisTurn = null;
     });
+    _syncAfterAction(response);
     _addLog(
         'Turn ${_gameState.currentTurn} — Player ${_gameState.activePlayerIndex + 1}\'s turn');
   }
@@ -1169,6 +1577,7 @@ class _GameScreenState extends State<GameScreen> {
         lastEvent: 'Bought $tileId',
       );
     });
+    _syncAfterAction(response);
     _addLog('Player bought $tileId');
   }
 
@@ -1184,6 +1593,7 @@ class _GameScreenState extends State<GameScreen> {
         lastEvent: 'Upgraded $tileId',
       );
     });
+    _syncAfterAction(response);
     _addLog('Player upgraded $tileId');
   }
 
@@ -1892,10 +2302,10 @@ class _GameScreenState extends State<GameScreen> {
   }
 
   Widget _buildDiceDisplay() {
-    // Use animated values during rolling, otherwise use actual result
-    final dice1 = _isRollingDice ? _animDice1 : (_gameState.diceResult['dice1'] ?? 0);
-    final dice2 = _isRollingDice ? _animDice2 : (_gameState.diceResult['dice2'] ?? 0);
-    final show = _isRollingDice || _gameState.diceResult.isNotEmpty;
+    // Use animated values during rolling, otherwise use persistent dice result
+    final dice1 = _isRollingDice ? _animDice1 : (_lastDiceResult['dice1'] ?? 0);
+    final dice2 = _isRollingDice ? _animDice2 : (_lastDiceResult['dice2'] ?? 0);
+    final show = _isRollingDice || _lastDiceResult.isNotEmpty;
     return SizedBox(
       height: 60,
       child: show
@@ -1951,16 +2361,13 @@ class _GameScreenState extends State<GameScreen> {
   }
 
   Widget _buildActionButtons(PlayerTokenViewModel activePlayer) {
-    final isMyTurn = _gameState.activePlayerIndex ==
-        _gameState.players.indexOf(activePlayer);
-    final canAct = isMyTurn && !_isAnimating;
+    final canAct = _isLocalPlayersTurn && !_isAnimating;
     final canRoll = canAct && _rollsRemainingThisTurn > 0;
-    
+
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        // Roll dice (1 per turn, re-roll only on 6)
         FilledButton.icon(
           onPressed: canRoll ? _onRoll : null,
           icon: const Icon(Icons.casino, size: 18),
@@ -1969,21 +2376,18 @@ class _GameScreenState extends State<GameScreen> {
               : 'Roll'),
         ),
         const SizedBox(height: 4),
-        // Trade
         OutlinedButton.icon(
-          onPressed: () => _showTradeDialog(),
+          onPressed: canAct ? () => _showTradeDialog() : null,
           icon: const Icon(Icons.swap_horiz, size: 18),
           label: const Text('Trade'),
         ),
         const SizedBox(height: 4),
-        // Card inventory
         OutlinedButton.icon(
-          onPressed: () => _showCardInventoryDialog(),
+          onPressed: canAct ? () => _showCardInventoryDialog() : null,
           icon: const Icon(Icons.inventory_2, size: 18),
           label: const Text('Inventory'),
         ),
         const SizedBox(height: 4),
-        // End turn
         FilledButton.tonalIcon(
           onPressed: canAct ? _onEndTurn : null,
           icon: const Icon(Icons.skip_next, size: 18),

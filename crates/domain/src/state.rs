@@ -50,4 +50,42 @@ impl GameState {
     pub fn active_player_mut(&mut self) -> Option<&mut Player> {
         self.players.get_mut(self.active_player_index)
     }
+
+    /// Returns the `team_id` of the currently active player, if any.
+    pub fn active_team(&self) -> Option<String> {
+        self.players
+            .get(self.active_player_index)
+            .and_then(|p| p.team_id.clone())
+    }
+
+    /// Returns a vector of references to all players belonging to the given team.
+    pub fn team_members(&self, team_id: &str) -> Vec<&Player> {
+        self.players
+            .iter()
+            .filter(|p| p.team_id.as_deref() == Some(team_id))
+            .collect()
+    }
+
+    /// Returns `true` if all members of the given team are bankrupt (`cash < 0`).
+    /// If the team has no members, returns `false`.
+    pub fn team_bankrupt(&self, team_id: &str) -> bool {
+        let members: Vec<&Player> = self.team_members(team_id);
+        if members.is_empty() {
+            return false;
+        }
+        members.iter().all(|p| p.is_bankrupt())
+    }
+
+    /// Returns the IDs of all teams that have at least one non-bankrupt member.
+    pub fn remaining_teams(&self) -> Vec<String> {
+        let mut team_ids: Vec<String> = self
+            .players
+            .iter()
+            .filter_map(|p| p.team_id.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        team_ids.retain(|tid| !self.team_bankrupt(tid));
+        team_ids
+    }
 }

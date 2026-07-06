@@ -21,6 +21,7 @@ use crate::map::MapDefinition;
 // ============================================================================
 
 /// Result of loading a .smap file.
+#[derive(Debug)]
 pub struct SmapResult {
     pub definition: MapDefinition,
     pub thumbnail_png: Option<Vec<u8>>,
