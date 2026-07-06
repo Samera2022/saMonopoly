@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import 'character_selection_screen.dart';
+import 'game_lobby_screen.dart';
 import 'map_models.dart';
 import 'map_repository.dart';
 
@@ -427,7 +427,7 @@ class _MapSelectionScreenState extends State<MapSelectionScreen>
             Navigator.of(context).push(
               MaterialPageRoute(
                 builder: (_) =>
-                    CharacterSelectionScreen(mapId: map.id, mapMeta: map),
+                    GameLobbyScreen(mapId: map.id, mapMeta: map),
               ),
             );
           },
