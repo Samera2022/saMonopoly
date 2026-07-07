@@ -2,7 +2,11 @@ use sa_monopoly_domain::DomainError;
 use sa_monopoly_domain::GameState;
 use sa_monopoly_domain::Money;
 
-use crate::events::GameEvent;
+use crate::event_bus::AnyEvent;
+
+fn make_event(event_type: &str, payload: serde_json::Value) -> AnyEvent {
+    AnyEvent::new(event_type, "core", payload)
+}
 
 pub struct EconomyService;
 
@@ -140,12 +144,12 @@ impl EconomyService {
     pub fn buy_lottery_ticket(
         state: &mut GameState,
         number: u32,
-    ) -> Result<GameEvent, String> {
+    ) -> Result<AnyEvent, String> {
         crate::cards::LotteryService::buy_ticket(state, number)
     }
 
     /// Use a card from the active player's inventory.
-    pub fn use_card(state: &mut GameState, card_id: &str) -> Result<GameEvent, String> {
+    pub fn use_card(state: &mut GameState, card_id: &str) -> Result<AnyEvent, String> {
         let player_id = state
             .active_player()
             .map(|p| p.id.clone())
@@ -171,10 +175,13 @@ impl EconomyService {
                     }
                     player.jail_turns = 0;
                 }
-                Ok(GameEvent::CardUsed {
-                    player_id,
-                    card_id: card_id.to_string(),
-                })
+                Ok(make_event(
+                    "core:card_used",
+                    serde_json::json!({
+                        "player_id": player_id,
+                        "card_id": card_id,
+                    }),
+                ))
             }
             "bonus_200" => {
                 // Auto-consumed by engine on roll; manually use here
@@ -184,10 +191,13 @@ impl EconomyService {
                     }
                     player.cash += 200;
                 }
-                Ok(GameEvent::CardUsed {
-                    player_id,
-                    card_id: card_id.to_string(),
-                })
+                Ok(make_event(
+                    "core:card_used",
+                    serde_json::json!({
+                        "player_id": player_id,
+                        "card_id": card_id,
+                    }),
+                ))
             }
             "double_rent" => {
                 // This card is auto-consumed during rent payment;
@@ -197,10 +207,13 @@ impl EconomyService {
                         player.owned_cards.swap_remove(pos);
                     }
                 }
-                Ok(GameEvent::CardUsed {
-                    player_id,
-                    card_id: card_id.to_string(),
-                })
+                Ok(make_event(
+                    "core:card_used",
+                    serde_json::json!({
+                        "player_id": player_id,
+                        "card_id": card_id,
+                    }),
+                ))
             }
             "skip_turn" => {
                 // Skip the next turn by setting jail_turns = 1 (skip without jail)
@@ -210,10 +223,13 @@ impl EconomyService {
                     }
                     player.jail_turns = 1;
                 }
-                Ok(GameEvent::CardUsed {
-                    player_id,
-                    card_id: card_id.to_string(),
-                })
+                Ok(make_event(
+                    "core:card_used",
+                    serde_json::json!({
+                        "player_id": player_id,
+                        "card_id": card_id,
+                    }),
+                ))
             }
             _ => Err("unknown card".to_string()),
         }

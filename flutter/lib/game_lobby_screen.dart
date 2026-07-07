@@ -7,7 +7,9 @@ import 'network_service.dart' show NetworkService;
 
 import 'config_provider.dart' show ConfigProvider, GameConfig, NetworkConfig;
 import 'main.dart' show GameScreen;
-import 'map_models.dart' show MapMeta;
+import 'map_models.dart' show MapMeta, MapPluginRef;
+import 'plugin_manager_screen.dart';
+import 'plugin_models.dart' show PluginSyncEntry, PluginAckMessage;
 
 // ============================================================================
 // Data model for a player slot
@@ -102,6 +104,11 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
 
   NetworkService? _networkService;
   StreamSubscription<Map<String, dynamic>>? _netSub;
+
+  // ── Plugin sync state ─────────────────────────────────────────────────────
+  List<PluginSyncEntry> _activePlugins = [];
+  /// Client ID → (ready, missing_plugins) — host only
+  Map<String, bool> _clientReadyStates = {};
 
   // ── Player slots ──────────────────────────────────────────────────────────
   late List<PlayerSlotData> _slots;
@@ -359,6 +366,14 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
             });
             _broadcastRoster();
           }
+        } else if (type == 'plugin_ack') {
+          // Host: record client ack status
+          final ack = PluginAckMessage.fromJson(message);
+          setState(() {
+            _clientReadyStates[ack.clientId] = ack.ready;
+            _systemMessages.insert(0,
+                '插件同步: ${ack.ready ? "✅ ${ack.clientId} 已就绪" : "❌ ${ack.clientId} 缺少插件: ${ack.missingPlugins.join(", ")}"}');
+          });
         }
       });
 
@@ -524,6 +539,31 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
             ),
             (route) => false,
           );
+        } else if (type == 'plugin_sync') {
+          final pluginList = message['plugins'] as List<dynamic>? ?? [];
+          final entries = pluginList.map((p) => PluginSyncEntry.fromJson(p)).toList();
+
+          // Client: check for missing mandatory external plugins
+          final localPluginIds = <String>{}; // In production, query from PluginManager
+          final missing = <String>[];
+          for (final entry in entries) {
+            if (entry.mandatory && entry.source == 'external') {
+              if (!localPluginIds.contains(entry.id)) {
+                missing.add(entry.id);
+              }
+            }
+          }
+
+          setState(() {
+            _activePlugins = entries;
+          });
+
+          _networkService!.sendMessage({
+            'type': 'plugin_ack',
+            'client_id': 'local_client',
+            'ready': missing.isEmpty,
+            'missing_plugins': missing,
+          });
         }
       });
 
@@ -1848,6 +1888,10 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
         _buildMapPreviewCard(),
         const SizedBox(height: 16),
 
+        // Plugin management card
+        _buildPluginPanel(),
+        const SizedBox(height: 16),
+
         // Rules list (scrollable)
         Expanded(
           child: SingleChildScrollView(
@@ -2009,6 +2053,177 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  /// Plugin management panel in lobby.
+  Widget _buildPluginPanel() {
+    final bundledPlugins = [
+      const MapPluginRef(
+        id: 'economy_ext', name: '经济扩展',
+        minVersion: '1.0.0', mandatory: true, source: 'bundled',
+      ),
+      const MapPluginRef(
+        id: 'special_events', name: '特殊事件',
+        minVersion: '2.0.0', mandatory: false, source: 'bundled',
+      ),
+    ];
+
+    // Determine which display list to use
+    final displayPlugins = _activePlugins.isNotEmpty
+        ? _activePlugins
+        : bundledPlugins.map((r) => PluginSyncEntry(
+              id: r.id,
+              name: r.name,
+              minVersion: r.minVersion,
+              mandatory: r.mandatory,
+              source: r.source,
+              enabled: true,
+            )).toList();
+
+    final synced = _activePlugins.isNotEmpty;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF8E24AA).withOpacity(0.08),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: const Color(0xFF8E24AA).withOpacity(0.20),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.extension_rounded,
+                  size: 16, color: Color(0xFFCE93D8)),
+              const SizedBox(width: 6),
+              const Text(
+                '插件管理',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFFCE93D8),
+                ),
+              ),
+              const Spacer(),
+              // Synced indicator
+              if (synced)
+                Container(
+                  margin: const EdgeInsets.only(right: 6),
+                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF43A047).withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: const Text('已同步',
+                      style: TextStyle(
+                          color: Color(0xFF43A047),
+                          fontSize: 10, fontWeight: FontWeight.w500)),
+                ),
+              TextButton.icon(
+                onPressed: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => const PluginManagerScreen(),
+                    ),
+                  );
+                },
+                icon: const Icon(Icons.open_in_new, size: 12),
+                label: const Text('管理', style: TextStyle(fontSize: 11)),
+                style: TextButton.styleFrom(
+                  foregroundColor: const Color(0xFFCE93D8),
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          ...displayPlugins.map((p) => Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Row(
+              children: [
+                Icon(
+                  p.mandatory
+                      ? Icons.inventory_2_rounded
+                      : Icons.extension_outlined,
+                  size: 14, color: Colors.white38,
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    p.name,
+                    style: const TextStyle(color: Colors.white70, fontSize: 12),
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: (p.mandatory
+                        ? const Color(0xFFFFA726)
+                        : const Color(0xFF43A047)).withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    p.mandatory ? '● 必选' : '○ 可选',
+                    style: TextStyle(
+                      color: p.mandatory
+                          ? const Color(0xFFFFA726)
+                          : const Color(0xFF43A047),
+                      fontSize: 10, fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF43A047).withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(p.enabled ? '已激活' : '未激活',
+                      style: TextStyle(
+                          color: p.enabled
+                              ? const Color(0xFF43A047)
+                              : const Color(0xFFFFA726),
+                          fontSize: 10, fontWeight: FontWeight.w500)),
+                ),
+              ],
+            ),
+          )),
+          // Host-only: client sync status
+          if (_lobbyMode == LobbyMode.host && _isHosting && _clientReadyStates.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            const Divider(color: Colors.white12, height: 1),
+            const SizedBox(height: 8),
+            ..._clientReadyStates.entries.map((e) => Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Row(
+                children: [
+                  Icon(
+                    e.value ? Icons.check_circle_rounded : Icons.warning_rounded,
+                    size: 14,
+                    color: e.value ? const Color(0xFF43A047) : const Color(0xFFFFA726),
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    '${e.key}: ${e.value ? "已同步" : "缺少插件"}',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: Colors.white.withOpacity(0.60),
+                    ),
+                  ),
+                ],
+              ),
+            )),
+          ],
+        ],
       ),
     );
   }

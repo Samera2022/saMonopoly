@@ -28,6 +28,8 @@ pub struct SmapResult {
     /// Locale-specific translations from `lang/*.json`.
     /// Key = locale code (e.g. "zh", "en"), value = name_key → display name.
     pub localizations: HashMap<String, HashMap<String, String>>,
+    /// Plugins extracted from the plugins/ directory inside the .smap
+    pub plugins: HashMap<String, Vec<u8>>, // plugin_id → raw bytes
 }
 
 /// Load a .smap file from a file path.
@@ -46,7 +48,7 @@ pub fn parse_smap_bytes(bytes: &[u8], source: &str) -> Result<SmapResult, String
     // ── Extract map.json (required) ───────────────────────────────────────
     let map_json = read_entry_by_name(&mut archive, "map.json")
         .ok_or_else(|| format!("{}: missing required entry 'map.json'", source))?;
-    let definition: MapDefinition = serde_json::from_slice(&map_json)
+    let mut definition: MapDefinition = serde_json::from_slice(&map_json)
         .map_err(|e| format!("{}: invalid map.json: {}", source, e))?;
 
     // ── Extract thumbnail.png (optional) ──────────────────────────────────
@@ -55,10 +57,23 @@ pub fn parse_smap_bytes(bytes: &[u8], source: &str) -> Result<SmapResult, String
     // ── Extract lang/*.json files (optional) ──────────────────────────────
     let localizations = extract_localizations(&mut archive);
 
+    // ── Extract plugins/ directory entries (optional) ─────────────────────
+    let plugins = extract_plugins(&mut archive);
+
+    // ── Populate bundled_data for plugin refs with source == Bundled ──────
+    for plugin_ref in &mut definition.plugins {
+        if plugin_ref.source == crate::map::MapPluginSource::Bundled {
+            if let Some(data) = plugins.get(&plugin_ref.id) {
+                plugin_ref.bundled_data = Some(data.clone());
+            }
+        }
+    }
+
     Ok(SmapResult {
         definition,
         thumbnail_png,
         localizations,
+        plugins,
     })
 }
 
@@ -96,6 +111,29 @@ fn extract_localizations(
     }
 
     result
+}
+
+/// Extract all plugin files from the `plugins/` directory inside the archive.
+fn extract_plugins(
+    archive: &mut ZipArchive<Cursor<&[u8]>>,
+) -> HashMap<String, Vec<u8>> {
+    let mut plugins = HashMap::new();
+    for i in 0..archive.len() {
+        let mut entry = match archive.by_index(i) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let name = entry.name().to_string();
+        if !name.starts_with("plugins/") || name.ends_with('/') {
+            continue;
+        }
+        let plugin_id = name.trim_start_matches("plugins/").to_string();
+        let mut data = Vec::new();
+        if entry.read_to_end(&mut data).is_ok() {
+            plugins.insert(plugin_id, data);
+        }
+    }
+    plugins
 }
 
 /// Get the name and data of an entry at a given index.

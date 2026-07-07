@@ -7,6 +7,8 @@ pub struct MapDefinition {
     pub name_key: String,
     pub tiles: Vec<MapTile>,
     pub rules: MapRules,
+    #[serde(default)]
+    pub plugins: Vec<MapPluginRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +44,23 @@ pub struct MapRules {
     /// Properties with manual `linked_targets` are skipped.
     #[serde(default)]
     pub auto_link_rent: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MapPluginRef {
+    pub id: String,
+    pub name: String,
+    pub min_version: String,
+    pub mandatory: bool,
+    pub source: MapPluginSource,
+    #[serde(skip)]
+    pub bundled_data: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MapPluginSource {
+    Bundled,
+    External,
 }
 
 pub trait MapValidator {

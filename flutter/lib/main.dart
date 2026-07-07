@@ -29,6 +29,8 @@ class GameStateData {
   final String lastEvent;
   final List<String> eventLog;
   final Map<String, int> diceResult;
+  /// Plugin activity messages (shown in purple in the event log)
+  final List<String> pluginMessages;
 
   const GameStateData({
     this.players = const [],
@@ -36,6 +38,7 @@ class GameStateData {
     this.lastEvent = '',
     this.eventLog = const [],
     this.diceResult = const {},
+    this.pluginMessages = const [],
   });
 
   GameStateData copyWith({
@@ -44,6 +47,7 @@ class GameStateData {
     String? lastEvent,
     List<String>? eventLog,
     Map<String, int>? diceResult,
+    List<String>? pluginMessages,
   }) {
     return GameStateData(
       players: players ?? this.players,
@@ -51,6 +55,7 @@ class GameStateData {
       lastEvent: lastEvent ?? this.lastEvent,
       eventLog: eventLog ?? this.eventLog,
       diceResult: diceResult ?? this.diceResult,
+      pluginMessages: pluginMessages ?? this.pluginMessages,
     );
   }
 
@@ -1050,8 +1055,17 @@ class _GameScreenState extends State<GameScreen> {
   void _addLog(String message) {
     final updatedLog = List<String>.from(_gameState.eventLog)
       ..insert(0, message);
+    // Detect plugin messages and add to pluginMessages list
+    List<String> updatedPluginMsgs = List.from(_gameState.pluginMessages);
+    if (message.startsWith('[DiceStats]') || message.startsWith('[TreasureHunt]')) {
+      updatedPluginMsgs.insert(0, message);
+      if (updatedPluginMsgs.length > 20) updatedPluginMsgs.removeLast();
+    }
     setState(() {
-      _gameState = _gameState.copyWith(eventLog: updatedLog);
+      _gameState = _gameState.copyWith(
+        eventLog: updatedLog,
+        pluginMessages: updatedPluginMsgs,
+      );
     });
   }
 
@@ -1162,6 +1176,15 @@ class _GameScreenState extends State<GameScreen> {
       // Keep _isAnimating for the movement phase below
     });
     _addLog('Rolled $dice1 + $dice2 = ${dice1 + dice2}$jailMsg');
+
+    // ═══ 插件消息检测 ═══════════════════════════════════════════════
+    // DiceStats 插件输出
+    final pluginMsg = response.event['_plugin_msg'] as String?;
+    if (pluginMsg != null) _addLog(pluginMsg);
+    // TreasureHunt 插件输出
+    final treasureMsg = response.event['_plugin_msg_treasure'] as String?;
+    if (treasureMsg != null) _addLog(treasureMsg);
+    // ══════════════════════════════════════════════════════════════
 
     // Skip tile effect + movement when stuck in jail (player didn't move).
     if (isJailRoll) {
@@ -2296,6 +2319,34 @@ class _GameScreenState extends State<GameScreen> {
             'Turn ${_gameState.currentTurn} | ${_playerPropertyCount(activePlayer.id)} props',
             style: Theme.of(context).textTheme.bodySmall?.copyWith(fontSize: 10),
           ),
+          // Plugin activity indicator
+          if (_gameState.pluginMessages.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Row(
+                children: [
+                  Container(
+                    width: 6, height: 6,
+                    decoration: const BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: Color(0xFFCE93D8),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  Flexible(
+                    child: Text(
+                      _gameState.pluginMessages.first,
+                      style: TextStyle(
+                        fontSize: 9,
+                        color: Colors.white.withOpacity(0.50),
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                      maxLines: 1,
+                    ),
+                  ),
+                ],
+              ),
+            ),
         ],
       ),
     );

@@ -1,0 +1,32 @@
+{
+    "id": "portal_world",
+    "version": "1.0.0",
+    "name_key": "maps.portal_world",
+    "rules": {
+        "allow_custom_topology": true,
+        "allow_stock_market": false,
+        "allow_lottery": false,
+        "allow_card_system": false,
+        "auto_link_rent": false
+    },
+    "plugins": [
+        {
+            "id": "portal_system",
+            "name": "传送门系统",
+            "min_version": "1.0.0",
+            "mandatory": true,
+            "source": "bundled"
+        }
+    ],
+    "tiles": [
+        { "id": "start", "name_key": "tile.start", "tile_type": "Start", "attributes": {} },
+        { "id": "portal_red", "name_key": "tile.portal_red", "tile_type": "SpecialProperty",
+          "attributes": { "plugin": "portal_system", "pair": "portal_blue" } },
+        { "id": "prop_a", "name_key": "tile.prop_a", "tile_type": "OrdinaryProperty",
+          "attributes": { "price": 200 } },
+        { "id": "portal_blue", "name_key": "tile.portal_blue", "tile_type": "SpecialProperty",
+          "attributes": { "plugin": "portal_system", "pair": "portal_red" } },
+        { "id": "prop_b", "name_key": "tile.prop_b", "tile_type": "OrdinaryProperty",
+          "attributes": { "price": 150 } }
+    ]
+}

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'main.dart' show GameScreen;
 import 'map_manager_screen.dart';
 import 'map_selection_screen.dart';
+import 'plugin_manager_screen.dart';
 import 'save_manager.dart';
 
 // ============================================================================
@@ -242,7 +243,11 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _onModFeature(BuildContext context) {
-    _showComingSoon(context, '模组功能');
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => const PluginManagerScreen(),
+      ),
+    );
   }
 
   void _onSettings(BuildContext context) {

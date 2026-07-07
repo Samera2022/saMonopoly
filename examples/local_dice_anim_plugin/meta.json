@@ -1,0 +1,13 @@
+{
+    "id": "dice_animation",
+    "name": "骰子动画增强",
+    "version": "1.0.0",
+    "author": "Community Modder",
+    "description": "为骰子掷出结果添加特效：连掷三次相同点数触发「狂暴」模式，doubles 时加倍租金",
+    "engine_compat": ">=0.5.0",
+    "dependencies": [],
+    "required_permissions": {
+        "granted": ["ReadState", "WriteState", "EventInjection"],
+        "denied": ["NetworkAccess", "FileSystemAccess", "HttpAccess", "ModifyAI"]
+    }
+}

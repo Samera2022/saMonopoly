@@ -10,6 +10,7 @@ import 'map_config_manager.dart';
 import 'map_models.dart';
 import 'map_repository.dart';
 import 'map_selection_screen.dart';
+import 'plugin_manager_screen.dart';
 import 'save_manager.dart';
 
 // ============================================================================
@@ -355,6 +356,10 @@ class _MapManagerScreenState extends State<MapManagerScreen> {
 
           // ── Config + Saves split ───────────────────────────────────
           _buildConfigAndSaves(meta, enabled, mapSaves),
+          const SizedBox(height: 24),
+
+          // ── Plugin section ──────────────────────────────────────────
+          _buildPluginSection(meta),
         ],
       ),
     );
@@ -677,6 +682,161 @@ class _MapManagerScreenState extends State<MapManagerScreen> {
               padding: EdgeInsets.zero,
               constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Plugin section for map detail ──────────────────────────────────
+
+  Widget _buildPluginSection(MapMeta meta) {
+    // Demo bundled plugins for this map
+    final bundledPlugins = [
+      const MapPluginRef(
+        id: 'economy_ext',
+        name: '经济扩展',
+        minVersion: '1.0.0',
+        mandatory: true,
+        source: 'bundled',
+      ),
+      const MapPluginRef(
+        id: 'special_events',
+        name: '特殊事件',
+        minVersion: '2.0.0',
+        mandatory: false,
+        source: 'bundled',
+      ),
+    ];
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.04),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white.withOpacity(0.06)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.extension_rounded,
+                  size: 18, color: Color(0xFFCE93D8)),
+              const SizedBox(width: 8),
+              const Text(
+                '插件管理',
+                style: TextStyle(
+                  color: Colors.white70,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const Spacer(),
+              TextButton.icon(
+                onPressed: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => const PluginManagerScreen(),
+                    ),
+                  );
+                },
+                icon: const Icon(Icons.open_in_new, size: 14),
+                label: const Text('管理全部', style: TextStyle(fontSize: 12)),
+                style: TextButton.styleFrom(
+                  foregroundColor: const Color(0xFFCE93D8),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          const Text(
+            '📦 地图自带插件',
+            style: TextStyle(
+                color: Colors.white54, fontSize: 12, fontWeight: FontWeight.w500),
+          ),
+          const SizedBox(height: 6),
+          ...bundledPlugins.map((p) => _buildPluginItem(p)),
+          const SizedBox(height: 8),
+          const Text(
+            '📂 本地插件',
+            style: TextStyle(
+                color: Colors.white54, fontSize: 12, fontWeight: FontWeight.w500),
+          ),
+          const SizedBox(height: 6),
+          _buildPluginItem(const MapPluginRef(
+            id: 'dice_stats',
+            name: '骰子统计',
+            source: 'external',
+          )),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPluginItem(MapPluginRef plugin) {
+    final isBundled = plugin.source == 'bundled';
+    final icon = isBundled ? Icons.inventory_2_rounded : Icons.folder_rounded;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.03),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, size: 16, color: Colors.white38),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              plugin.name,
+              style: const TextStyle(color: Colors.white70, fontSize: 12),
+            ),
+          ),
+          if (plugin.mandatory)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFA726).withOpacity(0.15),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: const Text('● 必选',
+                  style: TextStyle(
+                      color: Color(0xFFFFA726),
+                      fontSize: 10,
+                      fontWeight: FontWeight.w600)),
+            ),
+          if (!plugin.mandatory)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: const Color(0xFF43A047).withOpacity(0.15),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: const Text('○ 可选',
+                  style: TextStyle(
+                      color: Color(0xFF43A047),
+                      fontSize: 10,
+                      fontWeight: FontWeight.w600)),
+            ),
+          const SizedBox(width: 8),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(
+              color: const Color(0xFF43A047).withOpacity(0.15),
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: const Text('已激活',
+                style: TextStyle(
+                    color: Color(0xFF43A047),
+                    fontSize: 10,
+                    fontWeight: FontWeight.w500)),
           ),
         ],
       ),

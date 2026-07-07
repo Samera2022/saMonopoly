@@ -15,3 +15,6 @@ async-trait = "0.1"
 log = "0.4"
 tokio = { version = "1", features = ["sync", "rt"] }
 sa-monopoly-domain = { path = "../domain" }
+
+[dev-dependencies]
+env_logger = "0.11"

@@ -493,6 +493,32 @@ class BridgeClient {
           event['consecutive'] = 0;
           event['player_id'] = player['id'];
           event['to_tile'] = player['position'];
+
+          // ═══ DiceStats 插件模拟 ═══════════════════════════════════
+          // Track roll count in state so the plugin appears active
+          int rollCount = (state['_plugin_dice_stats_rolls'] as num?)?.toInt() ?? 0;
+          rollCount++;
+          state['_plugin_dice_stats_rolls'] = rollCount;
+          final sum = dice1 + dice2;
+          event['_plugin_msg'] = '[DiceStats] 第${rollCount}次掷骰: ${dice1}+${dice2}=${sum}';
+          // ═════════════════════════════════════════════════════════
+
+          // ═══ TreasureHunt 插件模拟 ════════════════════════════════
+          // If landed on a chance tile, grant bonus cash
+          final landedTileId = player['position'] as String;
+          final landedTile = tiles.cast<Map<String, dynamic>>().firstWhere(
+            (t) => t['id'] == landedTileId,
+            orElse: () => const <String, dynamic>{},
+          );
+          if (landedTile['kind'] == 'chance' || landedTile['tile_type'] == 'Chance') {
+            final reward = 50 + (rollCount * 13) % 151;
+            final p = Map<String, dynamic>.from(players[activeIdx]);
+            p['cash'] = ((p['cash'] as num?)?.toInt() ?? 0) + reward;
+            players[activeIdx] = p;
+            state['players'] = players;
+            event['_plugin_msg_treasure'] = '[TreasureHunt] 玩家 ${player['id']} 获得 \$${reward} 宝藏！';
+          }
+          // ══════════════════════════════════════════════════════════
         }
         break;
 

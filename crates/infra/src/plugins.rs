@@ -142,6 +142,53 @@ impl Default for DynamicLoadConfig {
 }
 
 // ============================================================================
+// PluginOrigin – source/origin of a plugin
+// ============================================================================
+
+/// Source/origin of a plugin
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PluginOrigin {
+    /// User-installed local plugin
+    Local {
+        install_path: PathBuf,
+        installed_at: u64,
+    },
+    /// Map-bundled plugin
+    Bundled {
+        map_id: String,
+        bundle_path: String,
+        mandatory: bool,
+    },
+    /// Built into the binary
+    BuiltIn,
+}
+
+// ============================================================================
+// PluginStatus – runtime status of a plugin
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PluginStatus {
+    Active,
+    Disabled,
+    Error(String),
+    MissingDependencies(Vec<String>),
+}
+
+/// Network-serializable plugin sync entry for multiplayer
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginSyncEntry {
+    pub id: String,
+    pub name: String,
+    pub min_version: String,
+    pub mandatory: bool,
+    pub source: String, // "bundled" | "external"
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundled_data: Option<String>, // base64 encoded plugin binary
+}
+
+// ============================================================================
 // PluginInfo – metadata about a registered plugin
 // ============================================================================
 
@@ -158,6 +205,12 @@ pub struct PluginInfo {
     pub load_config: Option<DynamicLoadConfig>,
     /// Whether the plugin is currently enabled.
     pub enabled: bool,
+    /// Source/origin of this plugin.
+    pub origin: PluginOrigin,
+    /// IDs of plugins this plugin depends on.
+    pub dependencies: Vec<String>,
+    /// Engine version compatibility constraint.
+    pub engine_compat: String,
 }
 
 impl PluginInfo {
@@ -171,7 +224,41 @@ impl PluginInfo {
             required_permissions: PermissionSet::default_safe(),
             load_config: None,
             enabled: true,
+            origin: PluginOrigin::BuiltIn,
+            dependencies: Vec::new(),
+            engine_compat: String::new(),
         }
+    }
+
+    /// Create a PluginInfo for a user-installed local plugin.
+    pub fn new_local(id: &str, name: &str, version: &str, install_path: PathBuf) -> Self {
+        let mut info = Self::new(id, name, version);
+        info.origin = PluginOrigin::Local {
+            install_path,
+            installed_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        };
+        info
+    }
+
+    /// Create a PluginInfo for a map-bundled plugin.
+    pub fn new_bundled(
+        id: &str,
+        name: &str,
+        version: &str,
+        map_id: &str,
+        bundle_path: &str,
+        mandatory: bool,
+    ) -> Self {
+        let mut info = Self::new(id, name, version);
+        info.origin = PluginOrigin::Bundled {
+            map_id: map_id.to_string(),
+            bundle_path: bundle_path.to_string(),
+            mandatory,
+        };
+        info
     }
 }
 
@@ -232,6 +319,9 @@ pub trait Plugin: Send + Sync {
             required_permissions: self.permissions(),
             load_config: None,
             enabled: true,
+            origin: PluginOrigin::BuiltIn,
+            dependencies: Vec::new(),
+            engine_compat: String::new(),
         }
     }
 }
@@ -571,14 +661,14 @@ impl PluginContentLoader {
 // DescriptorPlugin – wraps PluginDescriptor as a Plugin
 // ============================================================================
 
-struct DescriptorPlugin {
-    id: String,
-    version: String,
-    load_config: Option<DynamicLoadConfig>,
+pub struct DescriptorPlugin {
+    pub id: String,
+    pub version: String,
+    pub load_config: Option<DynamicLoadConfig>,
 }
 
 impl DescriptorPlugin {
-    fn from_descriptor(desc: &PluginDescriptor) -> Self {
+    pub fn from_descriptor(desc: &PluginDescriptor) -> Self {
         Self {
             id: desc.id.clone(),
             version: desc.version.clone(),
@@ -604,6 +694,9 @@ impl Plugin for DescriptorPlugin {
             required_permissions: PermissionSet::default_safe(),
             load_config: self.load_config.clone(),
             enabled: true,
+            origin: PluginOrigin::BuiltIn,
+            dependencies: Vec::new(),
+            engine_compat: String::new(),
         }
     }
 }

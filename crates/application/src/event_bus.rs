@@ -5,92 +5,48 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use crate::events::GameEvent;
 use sa_monopoly_domain::GameState;
+use sa_monopoly_domain::event::AnyEvent as DomainAnyEvent;
+use crate::command_handler::CommandHandlerRegistry;
+use crate::tile_behavior::TileBehaviorRegistry;
+use crate::ports::RngService;
 
 // ---------------------------------------------------------------------------
 // 2.1 AnyEvent
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum AnyEvent {
-    Core(GameEvent),
-    Custom {
-        event_type: String,
-        source: String,
-        payload: serde_json::Value,
-        timestamp: u64,
-    },
+pub struct AnyEvent {
+    pub event_type: String,
+    pub source: String,
+    pub payload: serde_json::Value,
+    pub timestamp: u64,
 }
 
 impl AnyEvent {
-    pub fn event_type(&self) -> &str {
-        match self {
-            AnyEvent::Core(e) => e.event_type(),
-            AnyEvent::Custom { event_type, .. } => event_type.as_str(),
+    pub fn new(event_type: &str, source: &str, payload: serde_json::Value) -> Self {
+        Self {
+            event_type: event_type.to_string(),
+            source: source.to_string(),
+            payload,
+            timestamp: timestamp_now(),
         }
+    }
+
+    pub fn event_type(&self) -> &str {
+        &self.event_type
     }
 
     pub fn source(&self) -> &str {
-        match self {
-            AnyEvent::Core(_) => "core",
-            AnyEvent::Custom { source, .. } => source.as_str(),
-        }
+        &self.source
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helper: provide an `event_type()` on `GameEvent` for AnyEvent::event_type()
-// ---------------------------------------------------------------------------
-
-impl GameEvent {
-    pub fn event_type(&self) -> &'static str {
-        match self {
-            GameEvent::GameStarted => "game_started",
-            GameEvent::CommandAccepted { .. } => "command_accepted",
-            GameEvent::CommandRejected { .. } => "command_rejected",
-            GameEvent::TurnAdvanced { .. } => "turn_advanced",
-            GameEvent::PlayerMoved { .. } => "player_moved",
-            GameEvent::PropertyBought { .. } => "property_bought",
-            GameEvent::RentPaid { .. } => "rent_paid",
-            GameEvent::StateSaved { .. } => "state_saved",
-            GameEvent::StateLoaded { .. } => "state_loaded",
-            GameEvent::PlayerSentToJail { .. } => "player_sent_to_jail",
-            GameEvent::PlayerSentToHospital { .. } => "player_sent_to_hospital",
-            GameEvent::PlayerReleasedFromJail { .. } => "player_released_from_jail",
-            GameEvent::PlayerReleasedFromHospital { .. } => "player_released_from_hospital",
-            GameEvent::CardDrawn { .. } => "card_drawn",
-            GameEvent::CardEffectExecuted { .. } => "card_effect_executed",
-            GameEvent::LotteryResult { .. } => "lottery_result",
-            GameEvent::StockMarketTick { .. } => "stock_market_tick",
-            GameEvent::TradeCompleted { .. } => "trade_completed",
-            GameEvent::AuctionStarted { .. } => "auction_started",
-            GameEvent::AuctionBid { .. } => "auction_bid",
-            GameEvent::AuctionWon { .. } => "auction_won",
-            GameEvent::AuctionEnded { .. } => "auction_ended",
-            GameEvent::PropertyMortgaged { .. } => "property_mortgaged",
-            GameEvent::PropertyRedeemed { .. } => "property_redeemed",
-            GameEvent::PlayerBankrupt { .. } => "player_bankrupt",
-            GameEvent::PlayerEliminated { .. } => "player_eliminated",
-            GameEvent::DiceRolled { .. } => "dice_rolled",
-            GameEvent::ExtraTurn { .. } => "extra_turn",
-            GameEvent::ThreeDoublesToJail { .. } => "three_doubles_to_jail",
-            GameEvent::CardShopList { .. } => "card_shop_list",
-            GameEvent::CardBought { .. } => "card_bought",
-            GameEvent::CardConsumed { .. } => "card_consumed",
-            GameEvent::SharesBought { .. } => "shares_bought",
-            GameEvent::SharesSold { .. } => "shares_sold",
-            GameEvent::GameWon { .. } => "game_won",
-            GameEvent::ConfigLoaded { .. } => "config_loaded",
-            GameEvent::ConfigUpdated { .. } => "config_updated",
-            GameEvent::LotteryAvailable { .. } => "lottery_available",
-            GameEvent::LotteryTicketBought { .. } => "lottery_ticket_bought",
-            GameEvent::LotteryDrawResult { .. } => "lottery_draw_result",
-            GameEvent::CardUsed { .. } => "card_used",
-            GameEvent::BailPaid { .. } => "bail_paid",
-        }
-    }
+fn timestamp_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 // ---------------------------------------------------------------------------
@@ -165,15 +121,11 @@ pub struct LoggingMiddleware;
 
 impl EventMiddleware for LoggingMiddleware {
     fn id(&self) -> &str {
-        "logging"
+        "core.logger"
     }
 
     fn process(&mut self, event: AnyEvent) -> Option<AnyEvent> {
-        log::info!(
-            "[EventBus] {} from {}",
-            event.event_type(),
-            event.source()
-        );
+        log::info!("[EVENT] {} from {}", event.event_type(), event.source());
         Some(event)
     }
 }
@@ -207,16 +159,16 @@ impl EventMiddleware for FilterMiddleware {
 }
 
 // ---------------------------------------------------------------------------
-// 2.9 EventBus
+// Internal subscriber entries
 // ---------------------------------------------------------------------------
 
-struct SubscriberEntry {
+pub(crate) struct SubscriberEntry {
     subscriber: Box<dyn EventSubscriber>,
     priority: SubscriberPriority,
     registered_at: usize,
 }
 
-struct AsyncSubscriberEntry {
+pub(crate) struct AsyncSubscriberEntry {
     /// Wrapped in Arc<Mutex<..>> so that we can cheaply clone the Arc
     /// into a tokio::spawn task while keeping the original in the registry.
     subscriber: Arc<Mutex<Box<dyn AsyncEventSubscriber>>>,
@@ -224,20 +176,30 @@ struct AsyncSubscriberEntry {
     registered_at: usize,
 }
 
+// ---------------------------------------------------------------------------
+// 2.9 EventBus — the central engine hub
+// ---------------------------------------------------------------------------
+
 pub struct EventBus {
-    middlewares: Vec<Box<dyn EventMiddleware>>,
-    sync_subscribers: Vec<SubscriberEntry>,
-    async_subscribers: Vec<AsyncSubscriberEntry>,
+    pub middlewares: Vec<Box<dyn EventMiddleware>>,
+    pub(crate) subscribers: Vec<SubscriberEntry>,
+    pub(crate) async_subscribers: Vec<AsyncSubscriberEntry>,
+    pub command_handlers: CommandHandlerRegistry,
+    pub tile_behaviors: TileBehaviorRegistry,
     sorted: bool,
+    custom_events: Vec<AnyEvent>,
 }
 
 impl EventBus {
     pub fn new() -> Self {
         Self {
             middlewares: Vec::new(),
-            sync_subscribers: Vec::new(),
+            subscribers: Vec::new(),
             async_subscribers: Vec::new(),
-            sorted: false,
+            command_handlers: CommandHandlerRegistry::new(),
+            tile_behaviors: TileBehaviorRegistry::new(),
+            sorted: true,
+            custom_events: Vec::new(),
         }
     }
 
@@ -247,8 +209,8 @@ impl EventBus {
 
     pub fn subscribe(&mut self, sub: Box<dyn EventSubscriber>) {
         let priority = sub.priority();
-        let registered_at = self.sync_subscribers.len();
-        self.sync_subscribers.push(SubscriberEntry {
+        let registered_at = self.subscribers.len();
+        self.subscribers.push(SubscriberEntry {
             subscriber: sub,
             priority,
             registered_at,
@@ -268,10 +230,8 @@ impl EventBus {
     }
 
     pub fn unsubscribe(&mut self, id: &str) {
-        self.sync_subscribers.retain(|e| e.subscriber.id() != id);
+        self.subscribers.retain(|e| e.subscriber.id() != id);
         self.async_subscribers.retain(|e| {
-            // Try to lock briefly to check the id. If the lock is
-            // contended we skip removal (subscriber is busy in a task).
             e.subscriber
                 .try_lock()
                 .map(|guard| guard.id() != id)
@@ -279,11 +239,51 @@ impl EventBus {
         });
     }
 
-    pub fn publish(&mut self, event: GameEvent, state: &GameState) {
-        let any_event = AnyEvent::Core(event);
-        self.publish_any(any_event, state);
+    // ─── Core game loop entry points ───
+
+    /// Execute a command via the CommandHandlerRegistry
+    pub fn execute_command(
+        &mut self,
+        command: DomainAnyEvent,
+        state: &mut GameState,
+        rng: &mut dyn RngService,
+    ) {
+        let command_type = command.event_type().to_string();
+        // Use a raw pointer to split borrows: command_handlers (mutable)
+        // and self (mutable for the bus parameter) are different fields.
+        let handlers_ptr: *mut CommandHandlerRegistry = &mut self.command_handlers;
+        // SAFETY: command_handlers is the only field mutated through dispatch().
+        // The &mut self passed as bus does not alias command_handlers.
+        let dispatched = unsafe {
+            (*handlers_ptr).dispatch(&command_type, state, command, rng, self)
+        };
+        if !dispatched {
+            self.publish_error(&format!("unknown command: {command_type}"), state);
+        }
     }
 
+    /// Resolve a tile landing via the TileBehaviorRegistry
+    pub fn resolve_tile(
+        &mut self,
+        tile_type: &str,
+        state: &mut GameState,
+        tile_id: &str,
+        rng: &mut dyn RngService,
+    ) {
+        // Use a raw pointer to split borrows: tile_behaviors (read-only)
+        // and self (mutable for the bus parameter) are different fields.
+        let behaviors_ptr: *const TileBehaviorRegistry = &self.tile_behaviors;
+        // SAFETY: tile_behaviors is not mutated during execute() — it only reads
+        // the registry. The &mut self passed as bus does not alias tile_behaviors.
+        let executed = unsafe { (*behaviors_ptr).execute(tile_type, state, tile_id, rng, self) };
+        if !executed {
+            log::warn!("No behavior registered for tile type: {tile_type}");
+        }
+    }
+
+    // ─── Event publishing ───
+
+    /// Publish a custom (ad-hoc) event with arbitrary JSON payload
     pub fn publish_custom(
         &mut self,
         event_type: &str,
@@ -291,26 +291,39 @@ impl EventBus {
         payload: serde_json::Value,
         state: &GameState,
     ) {
-        let any_event = AnyEvent::Custom {
+        let event = AnyEvent {
             event_type: event_type.to_string(),
             source: source.to_string(),
             payload,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
+            timestamp: timestamp_now(),
         };
-        self.publish_any(any_event, state);
+        self.publish_any(event, state);
     }
 
-    fn publish_any(&mut self, event: AnyEvent, state: &GameState) {
-        // --- Middleware chain ---
+    /// Publish an error as a custom "core:error" event
+    pub fn publish_error(&mut self, reason: &str, state: &GameState) {
+        self.publish_custom(
+            "core:error",
+            "core",
+            serde_json::json!({ "reason": reason }),
+            state,
+        );
+    }
+
+    /// Publish a pre-constructed AnyEvent
+    pub fn publish_any(&mut self, event: AnyEvent, state: &GameState) {
+        self.publish_internal(event, state);
+    }
+
+    // ─── Internal dispatch ───
+
+    fn publish_internal(&mut self, event: AnyEvent, state: &GameState) {
+        // 1. Middleware chain
         let mut event = Some(event);
         for m in &mut self.middlewares {
             if let Some(e) = event.take() {
                 event = m.process(e);
             } else {
-                // A middleware returned None → event was consumed/dropped
                 return;
             }
         }
@@ -319,33 +332,31 @@ impl EventBus {
             return;
         };
 
-        // --- Sort subscribers by priority (stable sort preserves registration order) ---
+        // 2. Collect events for bridge response
+        self.custom_events.push(event.clone());
+
+        // 3. Sort subscribers by priority (stable sort preserves registration order)
         if !self.sorted {
-            self.sync_subscribers
-                .sort_by_key(|e| (e.priority, e.registered_at));
+            self.subscribers.sort_by_key(|e| (e.priority, e.registered_at));
             self.async_subscribers
                 .sort_by_key(|e| (e.priority, e.registered_at));
             self.sorted = true;
         }
 
-        // --- Dispatch to sync subscribers ---
-        for entry in &mut self.sync_subscribers {
-            // Check interested_types before dispatching
+        // 4. Dispatch to sync subscribers with interested_types filtering
+        for entry in &mut self.subscribers {
             let types = entry.subscriber.interested_types();
-            if !types.is_empty() && !types.contains(&event.event_type()) {
+            if !types.is_empty() && !types.contains(&event.event_type.as_str()) {
                 continue;
             }
-            let action = entry.subscriber.on_event(&event, state);
-            match action {
+            match entry.subscriber.on_event(&event, state) {
                 EventAction::Continue => {}
                 EventAction::Consume => break,
-                EventAction::Modify(_modified) => {
-                    break;
-                }
+                EventAction::Modify(_) => break,
             }
         }
 
-        // --- Dispatch to async subscribers (fire-and-forget) ---
+        // 5. Dispatch to async subscribers (fire-and-forget)
         for entry in &self.async_subscribers {
             let sub_arc = Arc::clone(&entry.subscriber);
             let event = event.clone();
@@ -355,6 +366,11 @@ impl EventBus {
                 guard.on_event(&event, &state).await;
             });
         }
+    }
+
+    /// Drain collected custom events (used by bridge to flush response queue)
+    pub fn drain_custom_events(&mut self) -> Vec<AnyEvent> {
+        std::mem::take(&mut self.custom_events)
     }
 }
 
