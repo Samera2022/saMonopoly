@@ -11,6 +11,9 @@ dependencies:
     sdk: flutter
   cupertino_icons: ^1.0.8
   ffi: ^2.1.0
+  archive: ^3.6.1
+  path_provider: ^2.1.0
+  file_picker: ^8.0.0
 
 dev_dependencies:
   flutter_test:
@@ -21,3 +24,4 @@ flutter:
   assets:
     - assets/i18n/
     - assets/content/classic_pack.json
+    - assets/maps/

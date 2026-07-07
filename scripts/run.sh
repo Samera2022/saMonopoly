@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Use g++ if clang++ is not available (Flutter Linux desktop build requirement)
-if ! command -v clang++ &>/dev/null && command -v g++ &>/dev/null; then
-  export CXX=g++
+# Force use of gcc/g++ (the `jni` Flutter plugin's CMake looks for clang,
+# but if clang is not available, fall back to gcc).
+CC_FLAGS=""
+if ! command -v clang &>/dev/null && command -v gcc &>/dev/null; then
+  CC_FLAGS="CC=gcc CXX=g++"
 fi
 
 # ─── saMonopoly Build & Run Script ───────────────────────────────────────────
@@ -79,7 +81,12 @@ if [ -z "$FLUTTER_MODE" ]; then
 fi
 
 cd "$FLUTTER_DIR"
-flutter run $RUN_FLAGS
+# Prepend ~/bin to PATH so that clang/clang++ → gcc/g++ (Flutter
+# Linux build hardcodes CC=clang CXX=clang++; these wrappers redirect
+# to gcc/g++ when clang is not natively installed).
+export PATH="$HOME/bin:$PATH"
+# shellcheck disable=SC2086
+env $CC_FLAGS flutter run $RUN_FLAGS
 
 echo ""
 echo "Done."

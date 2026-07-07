@@ -1,6 +1,16 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use tokio::net::TcpListener;
+use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc::error::TryRecvError;
+use tokio_tungstenite::accept_async;
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message;
+
+use sa_monopoly_application::bridge::{BridgeRequest, EngineBridge};
 
 // ============================================================================
 // WebSocket configuration
@@ -342,6 +352,529 @@ impl Default for SessionManager {
 /// WebSocket settings so it is ready for a future real transport.
 pub fn disabled_with_default_config() -> DisabledNetworkTransport {
     DisabledNetworkTransport::with_config(WebSocketConfig::default())
+}
+
+// ============================================================================
+// WebSocketServer – real WebSocket server using tokio-tungstenite
+// ============================================================================
+
+/// A WebSocket server that accepts connections, deserializes JSON messages,
+/// processes them through the session manager, and optionally replies.
+pub struct WebSocketServer {
+    /// WebSocket configuration (host, port, etc.).
+    ws_config: WebSocketConfig,
+    /// Shared session manager for handling join/leave/start/end.
+    session_manager: Arc<Mutex<SessionManager>>,
+    /// Map of connected peers to their outbound message channels.
+    connected_peers: Arc<Mutex<HashMap<SessionEndpoint, mpsc::UnboundedSender<String>>>>,
+}
+
+impl WebSocketServer {
+    /// Create a new `WebSocketServer`.
+    pub fn new(config: WebSocketConfig, session_manager: Arc<Mutex<SessionManager>>) -> Self {
+        Self {
+            ws_config: config,
+            session_manager,
+            connected_peers: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Start the server: bind to the configured address and begin accepting connections.
+    ///
+    /// Each incoming connection is upgraded to a WebSocket and handled concurrently.
+    pub async fn start(self: Arc<Self>) -> Result<(), String> {
+        let addr = format!("{}:{}", self.ws_config.host, self.ws_config.port);
+        let listener = TcpListener::bind(&addr)
+            .await
+            .map_err(|e| format!("failed to bind to {}: {}", addr, e))?;
+
+        println!("WebSocket server listening on {}", addr);
+
+        while let Ok((stream, peer_addr)) = listener.accept().await {
+            let this = self.clone();
+            tokio::spawn(async move {
+                if let Err(e) = this.handle_connection(stream, peer_addr).await {
+                    eprintln!("connection error from {}: {}", peer_addr, e);
+                }
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Accept a single WebSocket connection and process its messages until disconnect.
+    async fn handle_connection(
+        &self,
+        stream: tokio::net::TcpStream,
+        peer_addr: std::net::SocketAddr,
+    ) -> Result<(), String> {
+        let ws_stream = accept_async(stream)
+            .await
+            .map_err(|e| format!("WebSocket handshake failed: {}", e))?;
+
+        let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+
+        let endpoint = SessionEndpoint::new(&peer_addr.ip().to_string(), peer_addr.port());
+        {
+            let mut peers = self.connected_peers.lock().await;
+            peers.insert(endpoint.clone(), tx);
+        }
+
+        // Spawn a task to forward messages from the channel to the WebSocket.
+        let forward_handle = tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                if ws_sender.send(Message::Text(msg)).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Read messages from the WebSocket.
+        while let Some(msg_result) = ws_receiver.next().await {
+            match msg_result {
+                Ok(msg) => {
+                    if let Err(e) = self.process_message(&endpoint, &msg).await {
+                        eprintln!(
+                            "error processing message from {}: {}",
+                            endpoint.addr(),
+                            e
+                        );
+                    }
+                }
+                Err(e) => {
+                    eprintln!("WebSocket error from {}: {}", endpoint.addr(), e);
+                    break;
+                }
+            }
+        }
+
+        // Clean up: remove the peer and abort the forwarding task.
+        {
+            let mut peers = self.connected_peers.lock().await;
+            peers.remove(&endpoint);
+        }
+        forward_handle.abort();
+
+        Ok(())
+    }
+
+    /// Deserialize a raw WebSocket message and route it to the appropriate handler.
+    async fn process_message(
+        &self,
+        endpoint: &SessionEndpoint,
+        msg: &Message,
+    ) -> Result<(), String> {
+        let text = msg
+            .to_text()
+            .map_err(|e| format!("failed to read message as text: {}", e))?;
+
+        let network_msg: NetworkMessage = serde_json::from_str(text)
+            .map_err(|e| format!("failed to deserialize message: {}", e))?;
+
+        match &network_msg {
+            NetworkMessage::Ping => {
+                // Reply with a Ping as acknowledgement.
+                self.send_to(endpoint, &NetworkMessage::Ping).await;
+            }
+            NetworkMessage::Session { kind, data } => {
+                self.handle_session_message(endpoint, kind, data).await;
+            }
+            NetworkMessage::Command { payload } => {
+                // Deserialize the command payload into a BridgeRequest.
+                let request: BridgeRequest = serde_json::from_str(payload)
+                    .map_err(|e| format!("failed to deserialize command payload: {}", e))?;
+
+                // Execute the engine command (the internal broadcaster is also invoked).
+                let response = EngineBridge::execute_with_broadcast(request);
+
+                // Serialise the resulting state into JSON and broadcast it.
+                let state_json = serde_json::to_string(&response.state)
+                    .map_err(|e| format!("failed to serialise state: {}", e))?;
+
+                let state_sync = NetworkMessage::StateSync { payload: state_json };
+                self.broadcast(&state_sync).await;
+            }
+            NetworkMessage::StateSync { .. } => {
+                // Forward state sync messages to all connected peers.
+                self.broadcast(&network_msg).await;
+            }
+            NetworkMessage::Error { .. } => {
+                eprintln!(
+                    "received error from {}: code={:?}",
+                    endpoint.addr(),
+                    network_msg
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle session-level control messages (Join, Leave, Ready, Start, End).
+    async fn handle_session_message(
+        &self,
+        endpoint: &SessionEndpoint,
+        kind: &SessionMessageKind,
+        data: &str,
+    ) {
+        match kind {
+            SessionMessageKind::Join => {
+                // data is expected to be JSON: {"session_id": "...", "player_id": "..."}
+                #[derive(Deserialize)]
+                struct JoinData {
+                    session_id: String,
+                    player_id: String,
+                }
+                match serde_json::from_str::<JoinData>(data) {
+                    Ok(join) => {
+                        let mut mgr = self.session_manager.lock().await;
+                        match mgr.join_session(&join.session_id, &join.player_id) {
+                            Ok(()) => {
+                                let reply = NetworkMessage::Session {
+                                    kind: SessionMessageKind::Join,
+                                    data: serde_json::json!({"status": "ok"}).to_string(),
+                                };
+                                self.send_to(endpoint, &reply).await;
+                            }
+                            Err(e) => {
+                                let reply = NetworkMessage::Error {
+                                    code: 1001,
+                                    message: e,
+                                };
+                                self.send_to(endpoint, &reply).await;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let reply = NetworkMessage::Error {
+                            code: 1002,
+                            message: format!("invalid join data: {}", e),
+                        };
+                        self.send_to(endpoint, &reply).await;
+                    }
+                }
+            }
+            SessionMessageKind::Leave => {
+                // data is expected to be JSON: {"session_id": "...", "player_id": "..."}
+                #[derive(Deserialize)]
+                struct LeaveData {
+                    session_id: String,
+                    player_id: String,
+                }
+                match serde_json::from_str::<LeaveData>(data) {
+                    Ok(leave) => {
+                        let mut mgr = self.session_manager.lock().await;
+                        match mgr.leave_session(&leave.session_id, &leave.player_id) {
+                            Ok(()) => {
+                                let reply = NetworkMessage::Session {
+                                    kind: SessionMessageKind::Leave,
+                                    data: serde_json::json!({"status": "ok"}).to_string(),
+                                };
+                                self.send_to(endpoint, &reply).await;
+                            }
+                            Err(e) => {
+                                let reply = NetworkMessage::Error {
+                                    code: 1003,
+                                    message: e,
+                                };
+                                self.send_to(endpoint, &reply).await;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let reply = NetworkMessage::Error {
+                            code: 1004,
+                            message: format!("invalid leave data: {}", e),
+                        };
+                        self.send_to(endpoint, &reply).await;
+                    }
+                }
+            }
+            SessionMessageKind::Ready => {
+                // Acknowledge readiness — no session-manager action required.
+                let reply = NetworkMessage::Session {
+                    kind: SessionMessageKind::Ready,
+                    data: serde_json::json!({"status": "ok"}).to_string(),
+                };
+                self.send_to(endpoint, &reply).await;
+            }
+            SessionMessageKind::Start => {
+                // data is expected to be JSON: {"session_id": "..."}
+                #[derive(Deserialize)]
+                struct StartData {
+                    session_id: String,
+                }
+                match serde_json::from_str::<StartData>(data) {
+                    Ok(start) => {
+                        let mut mgr = self.session_manager.lock().await;
+                        match mgr.start_session(&start.session_id) {
+                            Ok(()) => {
+                                let reply = NetworkMessage::Session {
+                                    kind: SessionMessageKind::Start,
+                                    data: serde_json::json!({"status": "ok"}).to_string(),
+                                };
+                                self.broadcast(&reply).await;
+                            }
+                            Err(e) => {
+                                let reply = NetworkMessage::Error {
+                                    code: 1005,
+                                    message: e,
+                                };
+                                self.send_to(endpoint, &reply).await;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let reply = NetworkMessage::Error {
+                            code: 1006,
+                            message: format!("invalid start data: {}", e),
+                        };
+                        self.send_to(endpoint, &reply).await;
+                    }
+                }
+            }
+            SessionMessageKind::End => {
+                // Broadcast session-end to all peers.
+                let reply = NetworkMessage::Session {
+                    kind: SessionMessageKind::End,
+                    data: serde_json::json!({"status": "ok"}).to_string(),
+                };
+                self.broadcast(&reply).await;
+            }
+        }
+    }
+
+    /// Send a message to a specific connected peer.
+    async fn send_to(&self, endpoint: &SessionEndpoint, message: &NetworkMessage) {
+        let json = serde_json::to_string(message).unwrap_or_default();
+        let peers = self.connected_peers.lock().await;
+        if let Some(tx) = peers.get(endpoint) {
+            let _ = tx.send(json);
+        }
+    }
+
+    /// Broadcast a message to all currently connected peers.
+    pub async fn broadcast(&self, message: &NetworkMessage) {
+        let json = serde_json::to_string(message).unwrap_or_default();
+        let peers = self.connected_peers.lock().await;
+        for tx in peers.values() {
+            let _ = tx.send(json.clone());
+        }
+    }
+}
+
+// ============================================================================
+// WebSocketClient – real WebSocket client using tokio-tungstenite
+// ============================================================================
+
+/// A WebSocket client that connects to a server, sends and receives
+/// [`NetworkMessage`] values as JSON text frames.
+pub struct WebSocketClient {
+    /// Server address in `"host:port"` format.
+    server_addr: String,
+    /// Channel sender for writing messages to the WebSocket write loop.
+    write_tx: Option<mpsc::UnboundedSender<String>>,
+    /// Channel receiver for reading messages from the WebSocket read loop.
+    read_rx: Option<mpsc::UnboundedReceiver<NetworkMessage>>,
+}
+
+impl WebSocketClient {
+    /// Create a new `WebSocketClient` targeting the given host and port.
+    pub fn new(host: &str, port: u16) -> Self {
+        Self {
+            server_addr: format!("{}:{}", host, port),
+            write_tx: None,
+            read_rx: None,
+        }
+    }
+
+    /// Connect to the WebSocket server and spawn background read/write tasks.
+    ///
+    /// # Write loop
+    /// Reads [`String`] messages from the internal write channel and sends
+    /// them as [`Message::Text`] through the WebSocket sink.
+    ///
+    /// # Read loop
+    /// Reads [`Message::Text`] frames from the WebSocket stream, deserialises
+    /// them into [`NetworkMessage`], and forwards them into the internal read
+    /// channel so they can be consumed by [`receive`](Self::receive).
+    pub async fn connect(&mut self) -> Result<(), String> {
+        // Build the ws:// URL from the stored address.
+        let url = format!("ws://{}", self.server_addr);
+
+        let (ws_stream, _) = connect_async(&url)
+            .await
+            .map_err(|e| format!("WebSocket connection to '{}' failed: {}", url, e))?;
+
+        let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+
+        // ── Write channel ──
+        let (write_tx, mut write_rx) = mpsc::unbounded_channel::<String>();
+        self.write_tx = Some(write_tx);
+
+        // ── Read channel ──
+        let (read_tx, read_rx) = mpsc::unbounded_channel::<NetworkMessage>();
+        self.read_rx = Some(read_rx);
+
+        // Spawn the write task: forward strings from the channel to the
+        // WebSocket sink as text frames.
+        tokio::spawn(async move {
+            while let Some(text) = write_rx.recv().await {
+                if ws_sender.send(Message::Text(text)).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Spawn the read task: deserialise incoming text frames into
+        // NetworkMessage and forward them into the read channel.
+        tokio::spawn(async move {
+            while let Some(msg_result) = ws_receiver.next().await {
+                match msg_result {
+                    Ok(msg) => {
+                        if let Ok(text) = msg.to_text() {
+                            if let Ok(network_msg) = serde_json::from_str::<NetworkMessage>(text) {
+                                let _ = read_tx.send(network_msg);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("WebSocket client read error: {}", e);
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    /// Send a [`NetworkMessage`] to the server as a JSON text frame.
+    ///
+    /// Returns an error if the client is not connected or the write channel
+    /// has been closed.
+    pub async fn send(&self, message: &NetworkMessage) -> Result<(), String> {
+        let tx = self
+            .write_tx
+            .as_ref()
+            .ok_or_else(|| "WebSocketClient is not connected".to_string())?;
+
+        let json = serde_json::to_string(message)
+            .map_err(|e| format!("failed to serialise message: {}", e))?;
+
+        tx.send(json)
+            .map_err(|_| "WebSocket write channel closed".to_string())
+    }
+
+    /// Attempt to receive a [`NetworkMessage`] (non-blocking).
+    ///
+    /// Returns `Ok(None)` when no message is available yet, and `Err` if the
+    /// client is not connected or the read channel has been closed.
+    pub async fn receive(&mut self) -> Result<Option<NetworkMessage>, String> {
+        let rx = self
+            .read_rx
+            .as_mut()
+            .ok_or_else(|| "WebSocketClient is not connected".to_string())?;
+
+        match rx.try_recv() {
+            Ok(msg) => Ok(Some(msg)),
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => {
+                Err("WebSocket read channel closed".to_string())
+            }
+        }
+    }
+}
+
+// ============================================================================
+// LobbyHost – high-level lobby lifecycle manager
+// ============================================================================
+
+/// High-level API that integrates [`WebSocketServer`] and [`SessionManager`]
+/// to manage a game lobby lifecycle.
+///
+/// Call [`new`](Self::new) to create a lobby, [`start`](Self::start) to begin
+/// accepting connections, and [`stop`](Self::stop) to shut down.
+pub struct LobbyHost {
+    /// The WebSocket server instance.
+    server: Arc<WebSocketServer>,
+    /// Shared session manager for creating and managing sessions.
+    session_manager: Arc<Mutex<SessionManager>>,
+    /// The session ID created by this host (set after [`create_session`](Self::create_session)).
+    session_id: Option<String>,
+    /// WebSocket configuration (cached for building session endpoints).
+    config: WebSocketConfig,
+}
+
+impl LobbyHost {
+    /// Create a new `LobbyHost` with the given WebSocket configuration.
+    ///
+    /// A [`SessionManager`] and [`WebSocketServer`] are created internally
+    /// and wired together.
+    pub fn new(config: WebSocketConfig) -> Self {
+        let session_manager = Arc::new(Mutex::new(SessionManager::new()));
+        let server = Arc::new(WebSocketServer::new(config.clone(), session_manager.clone()));
+        Self {
+            server,
+            session_manager,
+            session_id: None,
+            config,
+        }
+    }
+
+    /// Start the WebSocket server in the background.
+    ///
+    /// The server accepts connections until [`stop`](Self::stop) is called
+    /// or the `LobbyHost` is dropped.
+    pub async fn start(&mut self) -> Result<(), String> {
+        let server = self.server.clone();
+        tokio::spawn(async move {
+            let _ = server.start().await;
+        });
+        Ok(())
+    }
+
+    /// Stop the lobby service and reset its state.
+    ///
+    /// Clears the current session ID and replaces the session manager
+    /// with a fresh instance, effectively resetting the lobby.
+    pub async fn stop(&mut self) {
+        self.session_id = None;
+        self.session_manager = Arc::new(Mutex::new(SessionManager::new()));
+    }
+
+    /// Create a new game session with the given name and player limit.
+    ///
+    /// The session is registered in the [`SessionManager`] and its ID is
+    /// stored internally for later queries.  Only one session can be
+    /// created per `LobbyHost`; subsequent calls return an error.
+    pub fn create_session(&mut self, name: &str, max_players: usize) -> Result<String, String> {
+        if self.session_id.is_some() {
+            return Err("a session has already been created for this lobby".to_string());
+        }
+
+        let host = SessionEndpoint::new(&self.config.host, self.config.port);
+        let mut mgr = self.session_manager.blocking_lock();
+        let id = mgr.create_session(name, host, max_players);
+        self.session_id = Some(id.clone());
+        Ok(id)
+    }
+
+    /// Return information about the currently managed session, if any.
+    pub fn session_info(&self) -> Option<SessionInfo> {
+        let id = self.session_id.as_ref()?;
+        let mgr = self.session_manager.blocking_lock();
+        mgr.get_session(id).cloned()
+    }
+
+    /// Return the number of connected (joined) players in the current session.
+    pub fn connected_count(&self) -> usize {
+        self.session_info()
+            .map(|info| info.players.len())
+            .unwrap_or(0)
+    }
 }
 
 // ============================================================================

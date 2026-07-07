@@ -16,6 +16,8 @@ pub struct Player {
     pub owned_cards: Vec<String>,
     /// Number of shares owned in the stock market
     pub stock_shares: u32,
+    /// Optional team identifier for team-based gameplay
+    pub team_id: Option<String>,
 }
 
 impl Player {
@@ -53,6 +55,7 @@ mod tests {
             hospital_turns: 0,
             owned_cards: vec![],
             stock_shares: 0,
+            team_id: None,
         };
 
         assert!(player.can_afford(500));
@@ -73,6 +76,7 @@ mod tests {
             hospital_turns: 0,
             owned_cards: vec![],
             stock_shares: 0,
+            team_id: None,
         };
         assert!(player.is_in_jail());
     }
@@ -90,6 +94,7 @@ mod tests {
             hospital_turns: 2,
             owned_cards: vec![],
             stock_shares: 0,
+            team_id: None,
         };
         assert!(player.is_in_hospital());
     }
@@ -107,6 +112,7 @@ mod tests {
             hospital_turns: 0,
             owned_cards: vec![],
             stock_shares: 0,
+            team_id: None,
         };
         assert!(!player.is_in_jail());
         assert!(!player.is_in_hospital());
