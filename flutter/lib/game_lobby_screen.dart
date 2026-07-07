@@ -8,8 +8,8 @@ import 'network_service.dart' show NetworkService;
 import 'config_provider.dart' show ConfigProvider, GameConfig, NetworkConfig;
 import 'main.dart' show GameScreen;
 import 'map_models.dart' show MapMeta, MapPluginRef;
-import 'plugin_manager_screen.dart';
 import 'plugin_models.dart' show PluginSyncEntry, PluginAckMessage;
+import 'plugin_state.dart';
 
 // ============================================================================
 // Data model for a player slot
@@ -109,6 +109,8 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
   List<PluginSyncEntry> _activePlugins = [];
   /// Client ID → (ready, missing_plugins) — host only
   Map<String, bool> _clientReadyStates = {};
+  /// Plugin enable state
+  final Map<String, bool> _pluginEnabled = {};
 
   // ── Player slots ──────────────────────────────────────────────────────────
   late List<PlayerSlotData> _slots;
@@ -342,6 +344,9 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
             // Broadcast updated roster to all clients to sync ready states
             _broadcastRoster();
           }
+        } else if (type == 'plugin_list_request') {
+          // Client requests plugin list → broadcast current state
+          _broadcastPluginList();
         } else if (type == '_client_disconnected') {
           // Client disconnected abruptly (network failure / crash)
           final playerId = message['player_id'] as String?;
@@ -387,6 +392,8 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
         _isHosting = true;
         _systemMessages.insert(0, '🚀 已开放大厅到局域网 · $_hostAddress');
       });
+      // Broadcast initial plugin list to all clients
+      _broadcastPluginList();
     } catch (e) {
       setState(() {
         _systemMessages.insert(0, '⚠️ 启动主机失败: $e');
@@ -423,6 +430,22 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
     await _networkService!.sendMessage({
       'type': 'roster_sync',
       'players': roster,
+    });
+  }
+
+  /// Broadcast the current plugin list to all connected clients.
+  void _broadcastPluginList() {
+    if (!_isHosting || _networkService == null) return;
+    final entries = _activePlugins.isNotEmpty
+        ? _activePlugins
+        : [
+            PluginSyncEntry(id: 'economy_ext', name: '经济扩展', minVersion: '1.0.0', mandatory: true, source: 'bundled', enabled: true),
+            PluginSyncEntry(id: 'special_events', name: '特殊事件', minVersion: '2.0.0', mandatory: false, source: 'bundled', enabled: true),
+            PluginSyncEntry(id: 'dice_stats', name: '骰子统计', minVersion: '1.0.0', mandatory: false, source: 'external', enabled: true),
+          ];
+    _networkService!.sendMessage({
+      'type': 'plugin_sync',
+      'plugins': entries.map((e) => e.toJson()).toList(),
     });
   }
 
@@ -542,9 +565,10 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
         } else if (type == 'plugin_sync') {
           final pluginList = message['plugins'] as List<dynamic>? ?? [];
           final entries = pluginList.map((p) => PluginSyncEntry.fromJson(p)).toList();
+          final hostPluginIds = entries.map((e) => e.id).toSet();
 
           // Client: check for missing mandatory external plugins
-          final localPluginIds = <String>{}; // In production, query from PluginManager
+          final localPluginIds = <String>{'dice_stats', 'treasure_hunt'}; // demo local plugins
           final missing = <String>[];
           for (final entry in entries) {
             if (entry.mandatory && entry.source == 'external') {
@@ -553,6 +577,19 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
               }
             }
           }
+
+          // ═══ 强制禁用客户端多余的插件 ═══════════════════════════
+          // 任何不在 host 清单中的本地插件都会被禁用，
+          // 防止它们影响游戏规则
+          for (final localId in localPluginIds) {
+            if (!hostPluginIds.contains(localId)) {
+              PluginState().setEnabled(localId, false);
+            }
+          }
+          for (final hostId in hostPluginIds) {
+            PluginState().setEnabled(hostId, true);
+          }
+          // ═════════════════════════════════════════════════════════
 
           setState(() {
             _activePlugins = entries;
@@ -2070,8 +2107,20 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
       ),
     ];
 
+    // Demo local plugins that are "installed" on this device
+    final localPluginEntries = [
+      PluginSyncEntry(
+        id: 'dice_stats', name: '骰子统计',
+        minVersion: '1.0.0', mandatory: false, source: 'external', enabled: true,
+      ),
+      PluginSyncEntry(
+        id: 'treasure_hunt', name: '宝藏猎人',
+        minVersion: '1.0.0', mandatory: false, source: 'external', enabled: false,
+      ),
+    ];
+
     // Determine which display list to use
-    final displayPlugins = _activePlugins.isNotEmpty
+    final syncedEntries = _activePlugins.isNotEmpty
         ? _activePlugins
         : bundledPlugins.map((r) => PluginSyncEntry(
               id: r.id,
@@ -2081,6 +2130,12 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
               source: r.source,
               enabled: true,
             )).toList();
+    // Merge with local plugin entries
+    final displayPlugins = [
+      ...syncedEntries,
+      ...localPluginEntries.where((local) =>
+          !syncedEntries.any((s) => s.id == local.id)),
+    ];
 
     final synced = _activePlugins.isNotEmpty;
 
@@ -2103,7 +2158,7 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
                   size: 16, color: Color(0xFFCE93D8)),
               const SizedBox(width: 6),
               const Text(
-                '插件管理',
+                '插件',
                 style: TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w600,
@@ -2111,10 +2166,8 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
                 ),
               ),
               const Spacer(),
-              // Synced indicator
               if (synced)
                 Container(
-                  margin: const EdgeInsets.only(right: 6),
                   padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
                   decoration: BoxDecoration(
                     color: const Color(0xFF43A047).withOpacity(0.15),
@@ -2125,27 +2178,13 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
                           color: Color(0xFF43A047),
                           fontSize: 10, fontWeight: FontWeight.w500)),
                 ),
-              TextButton.icon(
-                onPressed: () {
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (_) => const PluginManagerScreen(),
-                    ),
-                  );
-                },
-                icon: const Icon(Icons.open_in_new, size: 12),
-                label: const Text('管理', style: TextStyle(fontSize: 11)),
-                style: TextButton.styleFrom(
-                  foregroundColor: const Color(0xFFCE93D8),
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  minimumSize: Size.zero,
-                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                ),
-              ),
             ],
           ),
           const SizedBox(height: 8),
-          ...displayPlugins.map((p) => Padding(
+          const Text('📦 地图自带',
+              style: TextStyle(color: Colors.white38, fontSize: 11, fontWeight: FontWeight.w500)),
+          const SizedBox(height: 4),
+          ...displayPlugins.where((p) => p.source == 'bundled').map((p) => Padding(
             padding: const EdgeInsets.only(bottom: 4),
             child: Row(
               children: [
@@ -2180,23 +2219,113 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
                     ),
                   ),
                 ),
-                const SizedBox(width: 6),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF43A047).withOpacity(0.15),
-                    borderRadius: BorderRadius.circular(4),
+                const SizedBox(width: 4),
+                GestureDetector(
+                  onTap: !p.mandatory ? () {
+                    final cur = _pluginEnabled[p.id] ?? true;
+                    final newVal = !cur;
+                    setState(() {
+                      _pluginEnabled[p.id] = newVal;
+                      PluginState().setEnabled(p.id, newVal);
+                    });
+                  } : null,
+                  child: Container(
+                    width: 28,
+                    height: 18,
+                    decoration: BoxDecoration(
+                      color: (_pluginEnabled[p.id] ?? true)
+                          ? const Color(0xFF43A047).withOpacity(0.20)
+                          : Colors.white.withOpacity(0.08),
+                      borderRadius: BorderRadius.circular(9),
+                      border: Border.all(
+                        color: (_pluginEnabled[p.id] ?? true)
+                            ? const Color(0xFF43A047).withOpacity(0.40)
+                            : Colors.white.withOpacity(0.15),
+                        width: 1,
+                      ),
+                    ),
+                    child: Center(
+                      child: Icon(
+                        !p.mandatory
+                            ? ((_pluginEnabled[p.id] ?? true)
+                                ? Icons.check_circle
+                                : Icons.remove_circle_outline)
+                            : Icons.lock_outline,
+                        size: 12,
+                        color: (_pluginEnabled[p.id] ?? true)
+                            ? const Color(0xFF43A047)
+                            : !p.mandatory
+                                ? Colors.white38
+                                : Colors.white24,
+                      ),
+                    ),
                   ),
-                  child: Text(p.enabled ? '已激活' : '未激活',
-                      style: TextStyle(
-                          color: p.enabled
-                              ? const Color(0xFF43A047)
-                              : const Color(0xFFFFA726),
-                          fontSize: 10, fontWeight: FontWeight.w500)),
                 ),
               ],
             ),
           )),
+          const SizedBox(height: 8),
+          const Text('📂 本地',
+              style: TextStyle(color: Colors.white38, fontSize: 11, fontWeight: FontWeight.w500)),
+          const SizedBox(height: 4),
+          ...displayPlugins.where((p) => p.source == 'external').map((p) => Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Row(
+              children: [
+                const Icon(Icons.folder_rounded, size: 14, color: Colors.white38),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    p.name,
+                    style: const TextStyle(color: Colors.white70, fontSize: 12),
+                  ),
+                ),
+                const SizedBox(width: 4),
+                GestureDetector(
+                  onTap: () {
+                    final cur = _pluginEnabled[p.id] ?? true;
+                    final newVal = !cur;
+                    setState(() {
+                      _pluginEnabled[p.id] = newVal;
+                      PluginState().setEnabled(p.id, newVal);
+                    });
+                  },
+                  child: Container(
+                    width: 28, height: 18,
+                    decoration: BoxDecoration(
+                      color: (_pluginEnabled[p.id] ?? true)
+                          ? const Color(0xFF43A047).withOpacity(0.20)
+                          : Colors.white.withOpacity(0.08),
+                      borderRadius: BorderRadius.circular(9),
+                      border: Border.all(
+                        color: (_pluginEnabled[p.id] ?? true)
+                            ? const Color(0xFF43A047).withOpacity(0.40)
+                            : Colors.white.withOpacity(0.15),
+                        width: 1,
+                      ),
+                    ),
+                    child: Center(
+                      child: Icon(
+                        (_pluginEnabled[p.id] ?? true)
+                            ? Icons.check_circle
+                            : Icons.remove_circle_outline,
+                        size: 12,
+                        color: (_pluginEnabled[p.id] ?? true)
+                            ? const Color(0xFF43A047)
+                            : Colors.white38,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          )),
+          if (displayPlugins.where((p) => p.source == 'external').isEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Text('（无已安装的本地插件）',
+                  style: TextStyle(color: Colors.white.withOpacity(0.20), fontSize: 11)),
+            ),
           // Host-only: client sync status
           if (_lobbyMode == LobbyMode.host && _isHosting && _clientReadyStates.isNotEmpty) ...[
             const SizedBox(height: 8),

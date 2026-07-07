@@ -17,6 +17,7 @@ import 'content_pack.dart';
 import 'content_pack_loader.dart';
 import 'isometric_board.dart';
 import 'lottery_dialog.dart';
+import 'plugin_state.dart';
 
 // ============================================================================
 // Game state management (simple InheritedWidget)
@@ -345,6 +346,8 @@ class _GameScreenState extends State<GameScreen> {
   @override
   void initState() {
     super.initState();
+    // Attach Rust engine to PluginState for real enable/disable
+    PluginState().attachEngine(_bridgeClient.engine);
     _pack = sampleClassicPack();
 
     // Map selection: 'classic' uses the 40-tile board, anything else uses

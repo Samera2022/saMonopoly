@@ -10,8 +10,8 @@ import 'map_config_manager.dart';
 import 'map_models.dart';
 import 'map_repository.dart';
 import 'map_selection_screen.dart';
-import 'plugin_manager_screen.dart';
 import 'save_manager.dart';
+import 'plugin_state.dart';
 
 // ============================================================================
 // Map Manager Screen – manage maps, config, and saves
@@ -41,6 +41,8 @@ class _MapManagerScreenState extends State<MapManagerScreen> {
 
   // Save list for selected map
   List<SaveMeta> _savesForSelected = [];
+  // Plugin enable state: plugin_id → enabled
+  final Map<String, bool> _pluginEnabled = {};
 
   @override
   void initState() {
@@ -726,30 +728,11 @@ class _MapManagerScreenState extends State<MapManagerScreen> {
                   size: 18, color: Color(0xFFCE93D8)),
               const SizedBox(width: 8),
               const Text(
-                '插件管理',
+                '插件',
                 style: TextStyle(
                   color: Colors.white70,
                   fontSize: 14,
                   fontWeight: FontWeight.w600,
-                ),
-              ),
-              const Spacer(),
-              TextButton.icon(
-                onPressed: () {
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (_) => const PluginManagerScreen(),
-                    ),
-                  );
-                },
-                icon: const Icon(Icons.open_in_new, size: 14),
-                label: const Text('管理全部', style: TextStyle(fontSize: 12)),
-                style: TextButton.styleFrom(
-                  foregroundColor: const Color(0xFFCE93D8),
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                  minimumSize: Size.zero,
-                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                 ),
               ),
             ],
@@ -782,9 +765,14 @@ class _MapManagerScreenState extends State<MapManagerScreen> {
   Widget _buildPluginItem(MapPluginRef plugin) {
     final isBundled = plugin.source == 'bundled';
     final icon = isBundled ? Icons.inventory_2_rounded : Icons.folder_rounded;
+    // Initialize state if not set
+    _pluginEnabled.putIfAbsent(plugin.id, () => true);
+    final enabled = _pluginEnabled[plugin.id] ?? true;
+    final canToggle = !plugin.mandatory;
+
     return Container(
       margin: const EdgeInsets.only(bottom: 4),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       decoration: BoxDecoration(
         color: Colors.white.withOpacity(0.03),
         borderRadius: BorderRadius.circular(6),
@@ -796,7 +784,11 @@ class _MapManagerScreenState extends State<MapManagerScreen> {
           Expanded(
             child: Text(
               plugin.name,
-              style: const TextStyle(color: Colors.white70, fontSize: 12),
+              style: TextStyle(
+                color: Colors.white70,
+                fontSize: 12,
+                fontWeight: enabled ? FontWeight.normal : FontWeight.w300,
+              ),
             ),
           ),
           if (plugin.mandatory)
@@ -812,31 +804,45 @@ class _MapManagerScreenState extends State<MapManagerScreen> {
                       fontSize: 10,
                       fontWeight: FontWeight.w600)),
             ),
-          if (!plugin.mandatory)
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+          const SizedBox(width: 4),
+          // Compact toggle: small icon button instead of full-size Switch
+          GestureDetector(
+            onTap: canToggle ? () {
+              final newVal = !enabled;
+              setState(() {
+                _pluginEnabled[plugin.id] = newVal;
+                PluginState().setEnabled(plugin.id, newVal);
+              });
+            } : null,
+            child: Container(
+              width: 28,
+              height: 18,
               decoration: BoxDecoration(
-                color: const Color(0xFF43A047).withOpacity(0.15),
-                borderRadius: BorderRadius.circular(4),
+                color: enabled
+                    ? const Color(0xFF43A047).withOpacity(0.20)
+                    : Colors.white.withOpacity(0.08),
+                borderRadius: BorderRadius.circular(9),
+                border: Border.all(
+                  color: enabled
+                      ? const Color(0xFF43A047).withOpacity(0.40)
+                      : Colors.white.withOpacity(0.15),
+                  width: 1,
+                ),
               ),
-              child: const Text('○ 可选',
-                  style: TextStyle(
-                      color: Color(0xFF43A047),
-                      fontSize: 10,
-                      fontWeight: FontWeight.w600)),
+              child: Center(
+                child: Icon(
+                  canToggle
+                      ? (enabled ? Icons.check_circle : Icons.remove_circle_outline)
+                      : Icons.lock_outline,
+                  size: 12,
+                  color: enabled
+                      ? const Color(0xFF43A047)
+                      : canToggle
+                          ? Colors.white38
+                          : Colors.white24,
+                ),
+              ),
             ),
-          const SizedBox(width: 8),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-            decoration: BoxDecoration(
-              color: const Color(0xFF43A047).withOpacity(0.15),
-              borderRadius: BorderRadius.circular(4),
-            ),
-            child: const Text('已激活',
-                style: TextStyle(
-                    color: Color(0xFF43A047),
-                    fontSize: 10,
-                    fontWeight: FontWeight.w500)),
           ),
         ],
       ),

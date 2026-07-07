@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'map_models.dart';
+import 'plugin_state.dart';
 
 // ============================================================================
 // Plugin Manager Screen – 插件管理
@@ -402,23 +403,23 @@ class _PluginManagerScreenState extends State<PluginManagerScreen> {
               width: double.infinity,
               child: FilledButton.icon(
                 onPressed: () {
+                  final idx = _categories[_selectedCategory].indexWhere((p) => p.id == plugin.id);
+                  if (idx < 0) return;
+                  final old = _categories[_selectedCategory][idx];
+                  final newEnabled = !old.enabled;
+                  PluginState().setEnabled(old.id, newEnabled);
                   setState(() {
-                    final list = _categories[_selectedCategory];
-                    final idx = list.indexWhere((p) => p.id == plugin.id);
-                    if (idx >= 0) {
-                      final old = list[idx];
-                      list[idx] = PluginEntry(
-                        id: old.id,
-                        name: old.name,
-                        version: old.version,
-                        author: old.author,
-                        description: old.description,
-                        enabled: !old.enabled,
-                        origin: old.origin,
-                        mandatory: old.mandatory,
-                        permissions: old.permissions,
-                      );
-                    }
+                    _categories[_selectedCategory][idx] = PluginEntry(
+                      id: old.id,
+                      name: old.name,
+                      version: old.version,
+                      author: old.author,
+                      description: old.description,
+                      enabled: newEnabled,
+                      origin: old.origin,
+                      mandatory: old.mandatory,
+                      permissions: old.permissions,
+                    );
                   });
                 },
                 icon: Icon(plugin.enabled

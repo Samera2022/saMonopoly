@@ -4,6 +4,8 @@ import 'dart:ffi';
 import 'package:flutter/material.dart';
 import 'package:ffi/ffi.dart';
 
+import 'plugin_state.dart';
+
 // ============================================================================
 // Bridge models – mirroring the Rust structures in
 // crates/application/src/bridge.rs
@@ -230,6 +232,8 @@ class PlayerViewModel {
 
 typedef SaEngineExecuteNative = Pointer<Utf8> Function(Pointer<Utf8>);
 typedef SaEngineExecuteDart = Pointer<Utf8> Function(Pointer<Utf8>);
+typedef SaEnginePluginCtlNative = Pointer<Utf8> Function(Pointer<Utf8>);
+typedef SaEnginePluginCtlDart = Pointer<Utf8> Function(Pointer<Utf8>);
 typedef SaEngineFreeStringNative = Void Function(Pointer<Utf8>);
 typedef SaEngineFreeStringDart = void Function(Pointer<Utf8>);
 
@@ -237,6 +241,7 @@ typedef SaEngineFreeStringDart = void Function(Pointer<Utf8>);
 class RustEngineBinding {
   late final DynamicLibrary _lib;
   late final SaEngineExecuteDart _execute;
+  late final SaEnginePluginCtlDart _pluginCtl;
   late final SaEngineFreeStringDart _freeString;
   bool _available = false;
 
@@ -275,6 +280,9 @@ class RustEngineBinding {
       _execute = _lib
           .lookupFunction<SaEngineExecuteNative, SaEngineExecuteDart>(
               'sa_engine_execute');
+      _pluginCtl = _lib
+          .lookupFunction<SaEnginePluginCtlNative, SaEnginePluginCtlDart>(
+              'sa_engine_plugin_ctl');
       _freeString = _lib
           .lookupFunction<SaEngineFreeStringNative, SaEngineFreeStringDart>(
               'sa_engine_free_string');
@@ -301,6 +309,25 @@ class RustEngineBinding {
     _freeString(resultPtr);
     return result;
   }
+
+  /// Call the Rust PluginController to enable/disable a plugin.
+  /// Returns the new enabled state, or null on failure.
+  bool? pluginCtl(String pluginId, bool enable) {
+    if (!_available) return null;
+    final payload = '{"plugin_id":"$pluginId","enable":$enable}';
+    final inputPtr = payload.toNativeUtf8();
+    final resultPtr = _pluginCtl(inputPtr);
+    calloc.free(inputPtr);
+    final result = resultPtr.toDartString();
+    _freeString(resultPtr);
+    try {
+      final json = jsonDecode(result) as Map<String, dynamic>;
+      if (json['ok'] == true) {
+        return json['enabled'] as bool;
+      }
+    } catch (_) {}
+    return null;
+  }
 }
 
 // ============================================================================
@@ -312,6 +339,9 @@ class BridgeClient {
 
   BridgeClient({RustEngineBinding? engine})
       : _engine = engine ?? RustEngineBinding();
+
+  /// Get the underlying Rust engine binding for direct FFI access.
+  RustEngineBinding get engine => _engine;
 
   /// Serialise a [BridgeRequest] into its JSON wire format.
   String buildRequest(BridgeRequest request) {
@@ -495,28 +525,31 @@ class BridgeClient {
           event['to_tile'] = player['position'];
 
           // ═══ DiceStats 插件模拟 ═══════════════════════════════════
-          // Track roll count in state so the plugin appears active
-          int rollCount = (state['_plugin_dice_stats_rolls'] as num?)?.toInt() ?? 0;
-          rollCount++;
-          state['_plugin_dice_stats_rolls'] = rollCount;
-          final sum = dice1 + dice2;
-          event['_plugin_msg'] = '[DiceStats] 第${rollCount}次掷骰: ${dice1}+${dice2}=${sum}';
+          if (PluginState().diceStatsEnabled) {
+            int rollCount = (state['_plugin_dice_stats_rolls'] as num?)?.toInt() ?? 0;
+            rollCount++;
+            state['_plugin_dice_stats_rolls'] = rollCount;
+            final sum = dice1 + dice2;
+            event['_plugin_msg'] = '[DiceStats] 第${rollCount}次掷骰: ${dice1}+${dice2}=${sum}';
+          }
           // ═════════════════════════════════════════════════════════
 
           // ═══ TreasureHunt 插件模拟 ════════════════════════════════
-          // If landed on a chance tile, grant bonus cash
-          final landedTileId = player['position'] as String;
-          final landedTile = tiles.cast<Map<String, dynamic>>().firstWhere(
-            (t) => t['id'] == landedTileId,
-            orElse: () => const <String, dynamic>{},
-          );
-          if (landedTile['kind'] == 'chance' || landedTile['tile_type'] == 'Chance') {
-            final reward = 50 + (rollCount * 13) % 151;
-            final p = Map<String, dynamic>.from(players[activeIdx]);
-            p['cash'] = ((p['cash'] as num?)?.toInt() ?? 0) + reward;
-            players[activeIdx] = p;
-            state['players'] = players;
-            event['_plugin_msg_treasure'] = '[TreasureHunt] 玩家 ${player['id']} 获得 \$${reward} 宝藏！';
+          if (PluginState().treasureHuntEnabled) {
+            final landedTileId = player['position'] as String;
+            final landedTile = tiles.cast<Map<String, dynamic>>().firstWhere(
+              (t) => t['id'] == landedTileId,
+              orElse: () => const <String, dynamic>{},
+            );
+            if (landedTile['kind'] == 'chance' || landedTile['tile_type'] == 'Chance') {
+              final rollCount = (state['_plugin_dice_stats_rolls'] as num?)?.toInt() ?? 1;
+              final reward = 50 + (rollCount * 13) % 151;
+              final p = Map<String, dynamic>.from(players[activeIdx]);
+              p['cash'] = ((p['cash'] as num?)?.toInt() ?? 0) + reward;
+              players[activeIdx] = p;
+              state['players'] = players;
+              event['_plugin_msg_treasure'] = '[TreasureHunt] 玩家 ${player['id']} 获得 \$${reward} 宝藏！';
+            }
           }
           // ══════════════════════════════════════════════════════════
         }
