@@ -2,6 +2,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
 use crate::bridge::{BridgeRequest, EngineBridge};
+use crate::event_bus::EventBus;
 
 pub struct NativeBridge;
 
@@ -11,7 +12,8 @@ impl NativeBridge {
     }
 
     pub fn execute_request(request: BridgeRequest) -> String {
-        let response = EngineBridge::execute(request);
+        let mut bus = EventBus::new();
+        let response = EngineBridge::execute(request, &mut bus);
         serde_json::to_string_pretty(&response)
             .unwrap_or_else(|err| format!(r#"{{"error":"{}"}}"#, err))
     }

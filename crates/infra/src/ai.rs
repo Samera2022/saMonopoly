@@ -1,137 +1,131 @@
-use sa_monopoly_application::commands::GameCommand;
-use sa_monopoly_application::engine::GameEngine;
 use sa_monopoly_application::game_session::GameSession;
 
-use crate::rng::XorShift64;
-
 pub trait PlayerAgent {
-    fn choose_command(&self, session: &GameSession) -> GameCommand;
+    fn choose_command(&self, session: &GameSession) -> String; // returns command type string
+    fn command_payload(&self, command_type: &str, session: &GameSession) -> serde_json::Value;
 }
 
 /// Simple heuristic AI agent
 pub struct HeuristicAgent;
 
 impl PlayerAgent for HeuristicAgent {
-    fn choose_command(&self, session: &GameSession) -> GameCommand {
+    fn choose_command(&self, session: &GameSession) -> String {
         if let Some(player) = session.active_player() {
             if player.cash > 200 {
                 if let Some(tile) = session.state.board.property(&player.position) {
                     if tile.owner.is_none() {
-                        return GameCommand::BuyProperty {
-                            tile_id: tile.tile_id.clone(),
-                        };
+                        return "core:command:buy_property".to_string();
                     }
                 }
-                return GameCommand::EndTurn;
+                return "core:command:end_turn".to_string();
             }
-            return GameCommand::Roll;
+            return "core:command:roll".to_string();
         }
-        GameCommand::EndTurn
-    }
-}
-
-/// Monte Carlo AI agent that simulates random playouts to choose the best action.
-///
-/// For each valid action, the agent runs `simulations` random playouts
-/// (each starting from a clone of the current state) and scores the
-/// resulting state.  The action with the highest average score is chosen.
-pub struct MonteCarloAgent {
-    pub simulations: u32,
-}
-
-impl MonteCarloAgent {
-    pub fn new(simulations: u32) -> Self {
-        Self { simulations }
+        "core:command:end_turn".to_string()
     }
 
-    /// Score a game state from the perspective of `player_id`.
-    /// Higher values indicate a more favourable state for that player.
-    fn score_state(state: &sa_monopoly_domain::GameState, player_id: &str) -> f64 {
-        let mut score = 0f64;
-
-        if let Some(player) = state.players.iter().find(|p| p.id == player_id) {
-            // Cash is king
-            score += player.cash as f64;
-
-            // Each owned property contributes a flat bonus
-            let owned = state
-                .board
-                .properties
-                .iter()
-                .filter(|p| p.owner.as_deref() == Some(player_id))
-                .count();
-            score += owned as f64 * 100.0;
-
-            // Penalties for being in jail / hospital
-            if player.jail_turns > 0 {
-                score -= 50.0;
+    fn command_payload(&self, command_type: &str, session: &GameSession) -> serde_json::Value {
+        match command_type {
+            "core:command:buy_property" => {
+                if let Some(player) = session.active_player() {
+                    serde_json::json!({ "tile_id": player.position })
+                } else {
+                    serde_json::json!({})
+                }
             }
-            if player.hospital_turns > 0 {
-                score -= 30.0;
-            }
+            _ => serde_json::json!({})
         }
-
-        score
     }
 }
+
+/// AI agent that evaluates candidate commands using heuristic scoring
+/// to choose the best action.
+pub struct MonteCarloAgent;
 
 impl PlayerAgent for MonteCarloAgent {
-    fn choose_command(&self, session: &GameSession) -> GameCommand {
+    fn choose_command(&self, session: &GameSession) -> String {
         let player_id = session
             .active_player()
             .map(|p| p.id.clone())
             .unwrap_or_default();
 
         if player_id.is_empty() {
-            return GameCommand::EndTurn;
+            return "core:command:end_turn".to_string();
         }
 
-        // Build the list of candidate commands
-        let mut candidates: Vec<GameCommand> = vec![GameCommand::Roll, GameCommand::EndTurn];
+        // Build the list of candidate command type strings
+        let mut candidates: Vec<&str> = vec!["core:command:roll", "core:command:end_turn"];
 
         // If the player is standing on an unowned property they can afford, add BuyProperty
         if let Some(player) = session.active_player() {
             if let Some(property) = session.state.board.property(&player.position) {
                 if property.owner.is_none() && player.cash >= property.base_price {
-                    candidates.push(GameCommand::BuyProperty {
-                        tile_id: property.tile_id.clone(),
-                    });
+                    candidates.push("core:command:buy_property");
                 }
             }
         }
 
-        // Monte Carlo: simulate each candidate and pick the best
+        // Score each candidate based on current state (no simulation needed)
         let mut best_score = f64::NEG_INFINITY;
-        let mut best_command = GameCommand::Roll;
+        let mut best_command = "core:command:roll";
 
         for cmd in &candidates {
-            let mut total_score = 0f64;
-
-            for _ in 0..self.simulations {
-                let mut sim_state = session.state.clone();
-                let mut sim_rng = XorShift64::new(sim_state.seed);
-
-                let event = GameEngine::execute(cmd.clone(), &mut sim_state, &mut sim_rng);
-
-                // Penalise commands that would be rejected
-                if matches!(
-                    event,
-                    sa_monopoly_application::events::GameEvent::CommandRejected { .. }
-                ) {
-                    total_score -= 1000.0;
-                    continue;
+            let score = match *cmd {
+                "core:command:buy_property" => {
+                    if let Some(player) = session.active_player() {
+                        if let Some(property) = session.state.board.property(&player.position) {
+                            // Value of property relative to cash
+                            let value_ratio = property.base_price as f64 / player.cash.max(1) as f64;
+                            if value_ratio <= 0.5 {
+                                200.0 // Good deal
+                            } else {
+                                100.0 // Still worth it
+                            }
+                        } else {
+                            0.0
+                        }
+                    } else {
+                        0.0
+                    }
                 }
+                "core:command:roll" => 50.0, // Rolling is usually beneficial
+                "core:command:end_turn" => 10.0, // Ending turn is the default fallback
+                _ => 0.0,
+            };
 
-                total_score += Self::score_state(&sim_state, &player_id);
-            }
-
-            let avg_score = total_score / self.simulations as f64;
-            if avg_score > best_score {
-                best_score = avg_score;
-                best_command = cmd.clone();
+            if score > best_score {
+                best_score = score;
+                best_command = cmd;
             }
         }
 
-        best_command
+        best_command.to_string()
+    }
+
+    fn command_payload(&self, command_type: &str, session: &GameSession) -> serde_json::Value {
+        match command_type {
+            "core:command:buy_property" => {
+                if let Some(player) = session.active_player() {
+                    serde_json::json!({ "tile_id": player.position })
+                } else {
+                    serde_json::json!({})
+                }
+            }
+            "core:command:roll" => {
+                if let Some(player) = session.active_player() {
+                    serde_json::json!({ "player_id": player.id })
+                } else {
+                    serde_json::json!({})
+                }
+            }
+            "core:command:end_turn" => {
+                if let Some(player) = session.active_player() {
+                    serde_json::json!({ "player_id": player.id })
+                } else {
+                    serde_json::json!({})
+                }
+            }
+            _ => serde_json::json!({}),
+        }
     }
 }

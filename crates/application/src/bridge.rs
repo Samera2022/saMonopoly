@@ -1,22 +1,19 @@
-use std::sync::OnceLock;
-
 use serde::{Deserialize, Serialize};
-
 use sa_monopoly_domain::GameState;
-
-use crate::commands::GameCommand;
-use crate::engine::GameEngine;
-use crate::events::GameEvent;
+use sa_monopoly_domain::event::AnyEvent;
+use crate::event_bus::EventBus;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BridgeRequest {
-    pub command: GameCommand,
+    pub command_type: String,
+    pub source: String,
+    pub payload: serde_json::Value,
     pub state: GameState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BridgeResponse {
-    pub event: GameEvent,
+    pub events: Vec<AnyEvent>,
     pub state: GameState,
 }
 
@@ -56,41 +53,50 @@ impl crate::ports::RngService for BridgeRng {
 
 pub struct EngineBridge;
 
-static BROADCASTER: OnceLock<Box<dyn Fn(&BridgeResponse) + Send + Sync>> = OnceLock::new();
-
 impl EngineBridge {
-    pub fn execute(request: BridgeRequest) -> BridgeResponse {
+    pub fn execute(request: BridgeRequest, bus: &mut EventBus) -> BridgeResponse {
         let mut state = request.state;
         let mut rng = BridgeRng::new(state.seed);
-        let event = GameEngine::execute(request.command, &mut state, &mut rng);
-        // Persist the RNG state back to the game state seed so the next
-        // command call continues the sequence rather than restarting from
-        // the same seed (which would produce identical dice rolls etc.).
+
+        // Create command as AnyEvent::Custom
+        let command = AnyEvent::Custom {
+            event_type: request.command_type,
+            source: request.source,
+            payload: request.payload,
+            timestamp: 0,
+        };
+
+        // Execute through EventBus
+        bus.execute_command(command, &mut state, &mut rng);
+
+        // Collect all events (convert from application AnyEvent to domain AnyEvent)
+        let app_events = bus.drain_custom_events();
+        let events: Vec<sa_monopoly_domain::event::AnyEvent> = app_events
+            .into_iter()
+            .map(|e| sa_monopoly_domain::event::AnyEvent::Custom {
+                event_type: e.event_type,
+                source: e.source,
+                payload: e.payload,
+                timestamp: e.timestamp,
+            })
+            .collect();
+
         state.seed = rng.current_state();
-        BridgeResponse { event, state }
-    }
-
-    pub fn set_broadcaster(f: Box<dyn Fn(&BridgeResponse) + Send + Sync>) {
-        let _ = BROADCASTER.set(f);
-    }
-
-    pub fn execute_with_broadcast(request: BridgeRequest) -> BridgeResponse {
-        let response = Self::execute(request);
-        if let Some(broadcaster) = BROADCASTER.get() {
-            broadcaster(&response);
-        }
-        response
+        BridgeResponse { events, state }
     }
 
     pub fn execute_json(input: &str) -> Result<String, String> {
         let request: BridgeRequest = serde_json::from_str(input).map_err(|err| err.to_string())?;
-        let response = Self::execute(request);
+        let mut bus = EventBus::new();
+        let response = Self::execute(request, &mut bus);
         serde_json::to_string_pretty(&response).map_err(|err| err.to_string())
     }
 
     pub fn example_request() -> BridgeRequest {
         BridgeRequest {
-            command: GameCommand::EndTurn,
+            command_type: "core:command:end_turn".to_string(),
+            source: "core".to_string(),
+            payload: serde_json::json!({}),
             state: GameState {
                 board: sa_monopoly_domain::Board {
                     tiles: vec![],
@@ -99,7 +105,7 @@ impl EngineBridge {
                     auto_link_rent: false,
                 },
                 players: vec![],
-                ruleset: sa_monopoly_domain::RuleSetRef {
+                ruleset: sa_monopoly_domain::rules::RuleSetRef {
                     id: "classic".to_string(),
                     version: "0.1.0".to_string(),
                 },

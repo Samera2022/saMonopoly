@@ -2,9 +2,10 @@ import 'package:flutter/material.dart';
 
 // ============================================================================
 // Dart models mirroring Rust map data structures from:
-//   crates/infra/src/map.rs   → MapDefinition, MapTile, MapRules
+//   crates/infra/src/map.rs     → MapDefinition, MapTile, MapRules, MapPluginRef
+//   crates/infra/src/plugins.rs → PluginInfo, PluginOrigin, PluginStatus
 //   crates/infra/src/content.rs → ContentPack
-//   crates/domain/src/tile.rs   → TileKind
+//   crates/domain/src/tile.rs   → TileKind (replaced by TileTypeId)
 //   crates/domain/src/property.rs → Property
 //   crates/domain/src/board.rs   → Board, BoardGraph
 // ============================================================================
@@ -488,3 +489,95 @@ class MapMeta {
     return 'assets/maps/$thumbnailPath';
   }
 }
+
+// ============================================================================
+// Plugin models (mirrors crates/infra/src/plugins.rs)
+// ============================================================================
+
+/// Plugin metadata for display
+class PluginEntry {
+    final String id;
+    final String name;
+    final String version;
+    final String author;
+    final String description;
+    final bool enabled;
+    final String origin; // "local", "bundled", "builtin"
+    final bool mandatory;
+    final List<String> permissions;
+  
+    const PluginEntry({
+      required this.id,
+      required this.name,
+      this.version = '',
+      this.author = '',
+      this.description = '',
+      this.enabled = false,
+      this.origin = 'builtin',
+      this.mandatory = false,
+      this.permissions = const [],
+    });
+  
+    factory PluginEntry.fromJson(Map<String, dynamic> json) {
+      return PluginEntry(
+        id: json['id'] as String? ?? '',
+        name: json['name'] as String? ?? '',
+        version: json['version'] as String? ?? '',
+        author: json['author'] as String? ?? '',
+        description: json['description'] as String? ?? '',
+        enabled: json['enabled'] as bool? ?? false,
+        origin: (json['origin'] is Map<String, dynamic>)
+            ? (json['origin'] as Map<String, dynamic>).keys.first
+            : 'builtin',
+        mandatory: _isMandatory(json['origin']),
+        permissions: _parsePermissions(json['required_permissions']),
+      );
+    }
+  
+    static bool _isMandatory(dynamic origin) {
+      if (origin is Map<String, dynamic>) {
+        final bundled = origin['Bundled'];
+        if (bundled is Map<String, dynamic>) {
+          return bundled['mandatory'] as bool? ?? false;
+        }
+      }
+      return false;
+    }
+  
+    static List<String> _parsePermissions(dynamic perms) {
+      if (perms is Map<String, dynamic>) {
+        final granted = perms['granted'];
+        if (granted is List) {
+          return granted.cast<String>();
+        }
+      }
+      return [];
+    }
+  }
+  
+  /// Map plugin reference (mirrors crates/infra/src/map.rs:MapPluginRef)
+  class MapPluginRef {
+    final String id;
+    final String name;
+    final String minVersion;
+    final bool mandatory;
+    final String source; // "bundled" or "external"
+  
+    const MapPluginRef({
+      required this.id,
+      required this.name,
+      this.minVersion = '',
+      this.mandatory = false,
+      this.source = 'external',
+    });
+  
+    factory MapPluginRef.fromJson(Map<String, dynamic> json) {
+      return MapPluginRef(
+        id: json['id'] as String? ?? '',
+        name: json['name'] as String? ?? '',
+        minVersion: json['min_version'] as String? ?? '',
+        mandatory: json['mandatory'] as bool? ?? false,
+        source: json['source'] as String? ?? 'external',
+      );
+    }
+  }

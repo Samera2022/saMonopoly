@@ -1,0 +1,13 @@
+{
+    "id": "portal_system",
+    "name": "传送门系统",
+    "version": "1.0.0",
+    "author": "Map Author",
+    "description": "添加传送门格子：玩家落在传送门上会被传送到地图上另一个传送门位置",
+    "engine_compat": ">=0.5.0",
+    "dependencies": [],
+    "required_permissions": {
+        "granted": ["ReadState", "WriteState", "EventInjection"],
+        "denied": ["NetworkAccess", "FileSystemAccess", "HttpAccess"]
+    }
+}

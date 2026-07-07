@@ -1,8 +1,6 @@
 use sa_monopoly_domain::GameState;
-
-use crate::commands::GameCommand;
-use crate::engine::GameEngine;
-use crate::events::GameEvent;
+use sa_monopoly_domain::event::AnyEvent;
+use crate::event_bus::EventBus;
 use crate::ports::RngService;
 
 /// Represents the decision a player makes during their turn.
@@ -39,119 +37,49 @@ pub trait DecisionMaker {
 pub struct TurnProcessor;
 
 impl TurnProcessor {
-    /// Execute a full turn for the active player.
-    /// Returns the list of all events generated during this turn.
-    pub fn process_turn(
+    /// Execute a full turn for the active player, publishing events through
+    /// the `EventBus` instead of returning them as a `Vec<GameEvent>`.
+    pub fn process_turn_with_bus(
         state: &mut GameState,
         rng: &mut dyn RngService,
         decision_maker: &mut dyn DecisionMaker,
-    ) -> Vec<GameEvent> {
-        let mut events = Vec::new();
+        bus: &mut EventBus,
+    ) {
+        // Phase 1: Roll
+        let roll_cmd = AnyEvent::Custom {
+            event_type: "core:command:roll".to_string(),
+            source: "core".to_string(),
+            payload: serde_json::json!({}),
+            timestamp: 0,
+        };
+        bus.execute_command(roll_cmd, state, rng);
 
-        // Phase 1: Roll dice → move → resolve tile
-        let roll_event = GameEngine::execute(GameCommand::Roll, state, rng);
-        events.push(roll_event.clone());
-
-        // Sprint 7: Extra turn from sum-7 — skip EndTurn
-        if matches!(&roll_event, GameEvent::ExtraTurn { .. } | GameEvent::DiceRolled { is_seven: true, .. }) {
-            return events;
-        }
-
-        // If the player was in jail/hospital, the roll was rejected and turn ends
-        match &roll_event {
-            GameEvent::CommandRejected { reason }
-                if reason == "player_in_jail" || reason == "player_in_hospital" =>
-            {
-                // Turn ends automatically (jail/hospital skip)
-                let end_event = GameEngine::execute(GameCommand::EndTurn, state, rng);
-                events.push(end_event);
-                return events;
-            }
-            GameEvent::PlayerReleasedFromJail { .. }
-            | GameEvent::PlayerReleasedFromHospital { .. } => {
-                // Player was released from jail/hospital this turn.
-                // The roll event indicates the release; no movement occurred,
-                // so the turn ends here.
-                let end_event = GameEngine::execute(GameCommand::EndTurn, state, rng);
-                events.push(end_event);
-                return events;
-            }
-            _ => {}
-        }
-
-        // Phase 2: After landing, check if the player can buy or upgrade the property
-        // Get the player's current position
+        // Phase 2: Check if player can buy property
         if let Some(player) = state.active_player() {
-            let tile_id = &player.position;
-
-            // Check if this tile has a property
-            if let Some(property) = state.board.property(tile_id) {
-                let pid = &player.id;
-
-                if property.owner.is_none() && !property.base_price.is_negative() {
-                    // Unowned property → offer to buy
-                    let decision =
-                        decision_maker.decide_buy_property(state, tile_id, property.base_price);
-                    match decision {
-                        PlayerDecision::BuyProperty(_) => {
-                            let buy_event = GameEngine::execute(
-                                GameCommand::BuyProperty {
-                                    tile_id: tile_id.clone(),
-                                },
-                                state,
-                                rng,
-                            );
-                            events.push(buy_event);
-                        }
-                        _ => {}
-                    }
-                } else if property.owner.as_deref() == Some(pid.as_str()) {
-                    // Own property → offer to upgrade
-                    let decision = decision_maker.decide_upgrade_property(
-                        state,
-                        tile_id,
-                        property.upgrade_level,
-                    );
-                    match decision {
-                        PlayerDecision::UpgradeProperty(_) => {
-                            let upgrade_event = GameEngine::execute(
-                                GameCommand::UpgradeProperty {
-                                    tile_id: tile_id.clone(),
-                                },
-                                state,
-                                rng,
-                            );
-                            events.push(upgrade_event);
-                        }
-                        _ => {}
+            let tile_id = player.position.clone();
+            if let Some(property) = state.board.property(&tile_id) {
+                if property.owner.is_none() {
+                    let decision = decision_maker.decide_buy_property(state, &tile_id, property.base_price);
+                    if matches!(decision, PlayerDecision::BuyProperty(_)) {
+                        let buy_cmd = AnyEvent::Custom {
+                            event_type: "core:command:buy_property".to_string(),
+                            source: "core".to_string(),
+                            payload: serde_json::json!({ "tile_id": tile_id }),
+                            timestamp: 0,
+                        };
+                        bus.execute_command(buy_cmd, state, rng);
                     }
                 }
             }
         }
 
         // Phase 3: End turn
-        let end_event = GameEngine::execute(GameCommand::EndTurn, state, rng);
-
-        // Sprint 7: If game ended, emit GameWon and skip TurnAdvanced
-        if let GameEvent::GameWon { .. } = &end_event {
-            events.push(end_event);
-            return events;
-        }
-
-        // Emit individual PlayerEliminated events for each eliminated player
-        if let GameEvent::TurnAdvanced {
-            ref eliminated_players,
-            ..
-        } = end_event
-        {
-            for pid in eliminated_players {
-                events.push(GameEvent::PlayerEliminated {
-                    player_id: pid.clone(),
-                });
-            }
-        }
-        events.push(end_event);
-
-        events
+        let end_cmd = AnyEvent::Custom {
+            event_type: "core:command:end_turn".to_string(),
+            source: "core".to_string(),
+            payload: serde_json::json!({}),
+            timestamp: 0,
+        };
+        bus.execute_command(end_cmd, state, rng);
     }
 }

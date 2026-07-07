@@ -5,6 +5,7 @@ pub mod content;
 pub mod discovery;
 pub mod llm;
 pub mod map;
+pub mod plugin_manager;
 pub mod smap;
 pub mod network;
 pub mod persistence;

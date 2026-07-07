@@ -17,6 +17,7 @@ import 'content_pack.dart';
 import 'content_pack_loader.dart';
 import 'isometric_board.dart';
 import 'lottery_dialog.dart';
+import 'plugin_state.dart';
 
 // ============================================================================
 // Game state management (simple InheritedWidget)
@@ -29,6 +30,8 @@ class GameStateData {
   final String lastEvent;
   final List<String> eventLog;
   final Map<String, int> diceResult;
+  /// Plugin activity messages (shown in purple in the event log)
+  final List<String> pluginMessages;
 
   const GameStateData({
     this.players = const [],
@@ -36,6 +39,7 @@ class GameStateData {
     this.lastEvent = '',
     this.eventLog = const [],
     this.diceResult = const {},
+    this.pluginMessages = const [],
   });
 
   GameStateData copyWith({
@@ -44,6 +48,7 @@ class GameStateData {
     String? lastEvent,
     List<String>? eventLog,
     Map<String, int>? diceResult,
+    List<String>? pluginMessages,
   }) {
     return GameStateData(
       players: players ?? this.players,
@@ -51,6 +56,7 @@ class GameStateData {
       lastEvent: lastEvent ?? this.lastEvent,
       eventLog: eventLog ?? this.eventLog,
       diceResult: diceResult ?? this.diceResult,
+      pluginMessages: pluginMessages ?? this.pluginMessages,
     );
   }
 
@@ -340,6 +346,8 @@ class _GameScreenState extends State<GameScreen> {
   @override
   void initState() {
     super.initState();
+    // Attach Rust engine to PluginState for real enable/disable
+    PluginState().attachEngine(_bridgeClient.engine);
     _pack = sampleClassicPack();
 
     // Map selection: 'classic' uses the 40-tile board, anything else uses
@@ -462,7 +470,9 @@ class _GameScreenState extends State<GameScreen> {
         final dice2 = (message['dice2'] as num?)?.toInt() ?? 0;
         final state = message['state'] as Map<String, dynamic>?;
         final event = message['event'] as Map<String, dynamic>?;
+        final rollLog = message['action_log'] as String?;
         if (state != null) {
+          if (rollLog != null && rollLog.isNotEmpty) _addLog(rollLog);
           if (isHost) {
             _handleRemoteRollEnd(dice1, dice2, state, event);
             _networkService?.sendMessage(message);
@@ -503,28 +513,33 @@ class _GameScreenState extends State<GameScreen> {
       case 'state_sync':
         final state = message['state'] as Map<String, dynamic>?;
         final event = message['event'] as Map<String, dynamic>?;
+        final actionLog = message['action_log'] as String?;
         if (state != null) {
           debugPrint('[NetSync] Received state_sync (isHost: $isHost)');
+
+          // Replay the action log so all peers see the same messages
+          if (actionLog != null && actionLog.isNotEmpty) {
+            _addLog(actionLog);
+          }
 
           if (isHost) {
             // ── Host received state from a client ─────────────────────
             setState(() {
               _currentState = state;
-              _gameState = _buildGameState(state, lastEvent: 'State synced');
+              _gameState = _buildGameState(state, lastEvent: actionLog ?? 'State synced');
             });
-            // Rebroadcast to all other clients
+            // Rebroadcast to all other clients (keep action_log)
             _networkService?.sendMessage({
               'type': 'state_sync',
               'state': state,
               'event': event,
+              if (actionLog != null) 'action_log': actionLog,
             });
           } else {
             // ── Client received state from host ───────────────────────
-            // Note: dice rolls use roll_start/roll_end protocol; state_sync
-            // here only carries non-roll updates (EndTurn, BuyProperty, etc.)
             setState(() {
               _currentState = state;
-              _gameState = _buildGameState(state, lastEvent: 'State synced');
+              _gameState = _buildGameState(state, lastEvent: actionLog ?? 'State synced');
             });
           }
         } else {
@@ -558,7 +573,8 @@ class _GameScreenState extends State<GameScreen> {
   }
 
   /// Broadcast the final dice result after animation completes.
-  void _broadcastRollEnd(int dice1, int dice2, BridgeResponse response) {
+  /// [actionLog] is the log message to sync to all peers.
+  void _broadcastRollEnd(int dice1, int dice2, BridgeResponse response, {String? actionLog}) {
     final net = widget.networkService;
     if (net == null || !mounted) return;
     net.sendMessage({
@@ -567,6 +583,7 @@ class _GameScreenState extends State<GameScreen> {
       'dice2': dice2,
       'state': response.state,
       'event': response.event,
+      if (actionLog != null) 'action_log': actionLog,
     });
   }
 
@@ -690,13 +707,8 @@ class _GameScreenState extends State<GameScreen> {
   }
 
   /// After executing a game action, sync the resulting state to network peers.
-  ///
-  /// - **Host**: broadcasts to all connected clients.
-  /// - **Client**: sends state to the host, which updates itself and rebroadcasts
-  ///   to all other clients.
-  ///
-  /// This ensures every node in the session sees the same authoritative state.
-  void _syncAfterAction(BridgeResponse response) {
+  /// [actionLog] is included so all peers see the same log messages.
+  void _syncAfterAction(BridgeResponse response, {String? actionLog}) {
     final net = widget.networkService;
     if (net == null || !mounted) return;
     debugPrint('[NetSync] Syncing after action (isHost: ${net.isHost})');
@@ -704,18 +716,19 @@ class _GameScreenState extends State<GameScreen> {
       'type': 'state_sync',
       'state': response.state,
       'event': response.event,
+      if (actionLog != null) 'action_log': actionLog,
     });
   }
 
   /// Sync the current local state to network peers without a BridgeResponse.
-  /// Used after tile-effect resolution that modifies state directly in Dart.
-  void _syncCurrentState({String eventType = 'TileEffect'}) {
+  void _syncCurrentState({String eventType = 'TileEffect', String? actionLog}) {
     final net = widget.networkService;
     if (net == null || !mounted) return;
     net.sendMessage({
       'type': 'state_sync',
       'state': _currentState,
       'event': {'event_type': eventType},
+      if (actionLog != null) 'action_log': actionLog,
     });
   }
 
@@ -1050,8 +1063,17 @@ class _GameScreenState extends State<GameScreen> {
   void _addLog(String message) {
     final updatedLog = List<String>.from(_gameState.eventLog)
       ..insert(0, message);
+    // Detect plugin messages and add to pluginMessages list
+    List<String> updatedPluginMsgs = List.from(_gameState.pluginMessages);
+    if (message.startsWith('[DiceStats]') || message.startsWith('[TreasureHunt]')) {
+      updatedPluginMsgs.insert(0, message);
+      if (updatedPluginMsgs.length > 20) updatedPluginMsgs.removeLast();
+    }
     setState(() {
-      _gameState = _gameState.copyWith(eventLog: updatedLog);
+      _gameState = _gameState.copyWith(
+        eventLog: updatedLog,
+        pluginMessages: updatedPluginMsgs,
+      );
     });
   }
 
@@ -1124,8 +1146,15 @@ class _GameScreenState extends State<GameScreen> {
     await Future.delayed(const Duration(milliseconds: 400));
     if (!mounted) return;
 
-    // 6. Broadcast roll_end with the authoritative result
-    _broadcastRollEnd(dice1, dice2, response);
+    // 6. Build the log message and broadcast roll_end (includes log for peers)
+    final jailMsg6 = isJailStillLocked
+        ? ' (jail — need 7)'
+        : isJailReleased
+            ? ' (released from jail!)'
+            : '';
+    final rollLog = 'Rolled $dice1 + $dice2 = ${dice1 + dice2}$jailMsg6';
+    _broadcastRollEnd(dice1, dice2, response, actionLog: rollLog);
+    _addLog(rollLog);
 
     // 7. Apply final state locally (position already updated by engine).
     //    Override the token position back to pre-roll so it doesn't
@@ -1144,24 +1173,26 @@ class _GameScreenState extends State<GameScreen> {
       }
     }
 
-    final jailMsg = isJailStillLocked
-        ? ' (jail — need 7)'
-        : isJailReleased
-            ? ' (released from jail!)'
-            : '';
     _lastDiceResult = {'dice1': dice1, 'dice2': dice2};
     setState(() {
       _currentState = response.state;
       _gameState = _buildGameState(
         response.state,
-        lastEvent: 'Rolled $dice1 + $dice2${isJailRoll ? '\n$jailMsg' : ''}',
+        lastEvent: rollLog,
         diceResult: {'dice1': dice1, 'dice2': dice2},
         positionOverrides: {activeIdx: currentPos},
       );
       _isRollingDice = false;
       // Keep _isAnimating for the movement phase below
     });
-    _addLog('Rolled $dice1 + $dice2 = ${dice1 + dice2}$jailMsg');
+    // ═══ 插件消息检测 ═══════════════════════════════════════════════
+    // DiceStats 插件输出
+    final pluginMsg = response.event['_plugin_msg'] as String?;
+    if (pluginMsg != null) _addLog(pluginMsg);
+    // TreasureHunt 插件输出
+    final treasureMsg = response.event['_plugin_msg_treasure'] as String?;
+    if (treasureMsg != null) _addLog(treasureMsg);
+    // ══════════════════════════════════════════════════════════════
 
     // Skip tile effect + movement when stuck in jail (player didn't move).
     if (isJailRoll) {
@@ -1305,12 +1336,11 @@ class _GameScreenState extends State<GameScreen> {
         lastEvent: accepted ? 'Bought $cardId' : 'Purchase rejected',
       );
     });
-    _syncAfterAction(response);
     if (accepted) {
-      _addLog('Bought card: $cardId');
+      _syncAfterAction(response, actionLog: 'Bought card: $cardId');
     } else {
       final reason = response.event['reason'] as String? ?? 'unknown';
-      _addLog('Card purchase rejected: $reason');
+      _syncAfterAction(response, actionLog: 'Card purchase rejected: $reason');
     }
   }
 
@@ -1323,8 +1353,7 @@ class _GameScreenState extends State<GameScreen> {
       _currentState = response.state;
       _gameState = _buildGameState(response.state, lastEvent: 'Used $cardId');
     });
-    _syncAfterAction(response);
-    _addLog('Used card: $cardId');
+    _syncAfterAction(response, actionLog: 'Used card: $cardId');
   }
 
   Future<void> _onBuyLotteryTicket(int number) async {
@@ -1338,8 +1367,7 @@ class _GameScreenState extends State<GameScreen> {
       _gameState =
           _buildGameState(response.state, lastEvent: 'Lottery #$number');
     });
-    _syncAfterAction(response);
-    _addLog('Bought lottery ticket #$number');
+    _syncAfterAction(response, actionLog: 'Bought lottery ticket #$number');
   }
 
   Future<void> _showCardShopDialog() async {
@@ -1560,9 +1588,8 @@ class _GameScreenState extends State<GameScreen> {
       _rollsRemainingThisTurn = 1;
       _landedTileIdThisTurn = null;
     });
-    _syncAfterAction(response);
-    _addLog(
-        'Turn ${_gameState.currentTurn} — Player ${_gameState.activePlayerIndex + 1}\'s turn');
+    _syncAfterAction(response,
+        actionLog: 'Turn ${_gameState.currentTurn} — Player ${_gameState.activePlayerIndex + 1}\'s turn');
   }
 
   Future<void> _onBuyProperty(String tileId) async {
@@ -1577,8 +1604,7 @@ class _GameScreenState extends State<GameScreen> {
         lastEvent: 'Bought $tileId',
       );
     });
-    _syncAfterAction(response);
-    _addLog('Player bought $tileId');
+    _syncAfterAction(response, actionLog: 'Player bought $tileId');
   }
 
   Future<void> _onUpgradeProperty(String tileId) async {
@@ -1593,8 +1619,7 @@ class _GameScreenState extends State<GameScreen> {
         lastEvent: 'Upgraded $tileId',
       );
     });
-    _syncAfterAction(response);
-    _addLog('Player upgraded $tileId');
+    _syncAfterAction(response, actionLog: 'Player upgraded $tileId');
   }
 
   /// Show a detailed property information dialog using state-based overlay.
@@ -2296,6 +2321,34 @@ class _GameScreenState extends State<GameScreen> {
             'Turn ${_gameState.currentTurn} | ${_playerPropertyCount(activePlayer.id)} props',
             style: Theme.of(context).textTheme.bodySmall?.copyWith(fontSize: 10),
           ),
+          // Plugin activity indicator
+          if (_gameState.pluginMessages.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Row(
+                children: [
+                  Container(
+                    width: 6, height: 6,
+                    decoration: const BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: Color(0xFFCE93D8),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  Flexible(
+                    child: Text(
+                      _gameState.pluginMessages.first,
+                      style: TextStyle(
+                        fontSize: 9,
+                        color: Colors.white.withOpacity(0.50),
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                      maxLines: 1,
+                    ),
+                  ),
+                ],
+              ),
+            ),
         ],
       ),
     );
@@ -2389,7 +2442,7 @@ class _GameScreenState extends State<GameScreen> {
         ),
         const SizedBox(height: 4),
         FilledButton.tonalIcon(
-          onPressed: canAct ? _onEndTurn : null,
+          onPressed: (canAct && _rollsRemainingThisTurn <= 0) ? _onEndTurn : null,
           icon: const Icon(Icons.skip_next, size: 18),
           label: const Text('End Turn'),
         ),

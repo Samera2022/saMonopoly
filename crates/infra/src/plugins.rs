@@ -1,8 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 
 use crate::discovery::{FileSystemPluginDiscovery, PluginDescriptor, PluginDiscovery};
+use sa_monopoly_application::event_bus::EventBus;
 
 // ============================================================================
 // Permission system
@@ -138,6 +142,53 @@ impl Default for DynamicLoadConfig {
 }
 
 // ============================================================================
+// PluginOrigin – source/origin of a plugin
+// ============================================================================
+
+/// Source/origin of a plugin
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PluginOrigin {
+    /// User-installed local plugin
+    Local {
+        install_path: PathBuf,
+        installed_at: u64,
+    },
+    /// Map-bundled plugin
+    Bundled {
+        map_id: String,
+        bundle_path: String,
+        mandatory: bool,
+    },
+    /// Built into the binary
+    BuiltIn,
+}
+
+// ============================================================================
+// PluginStatus – runtime status of a plugin
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PluginStatus {
+    Active,
+    Disabled,
+    Error(String),
+    MissingDependencies(Vec<String>),
+}
+
+/// Network-serializable plugin sync entry for multiplayer
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginSyncEntry {
+    pub id: String,
+    pub name: String,
+    pub min_version: String,
+    pub mandatory: bool,
+    pub source: String, // "bundled" | "external"
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundled_data: Option<String>, // base64 encoded plugin binary
+}
+
+// ============================================================================
 // PluginInfo – metadata about a registered plugin
 // ============================================================================
 
@@ -154,6 +205,12 @@ pub struct PluginInfo {
     pub load_config: Option<DynamicLoadConfig>,
     /// Whether the plugin is currently enabled.
     pub enabled: bool,
+    /// Source/origin of this plugin.
+    pub origin: PluginOrigin,
+    /// IDs of plugins this plugin depends on.
+    pub dependencies: Vec<String>,
+    /// Engine version compatibility constraint.
+    pub engine_compat: String,
 }
 
 impl PluginInfo {
@@ -167,7 +224,41 @@ impl PluginInfo {
             required_permissions: PermissionSet::default_safe(),
             load_config: None,
             enabled: true,
+            origin: PluginOrigin::BuiltIn,
+            dependencies: Vec::new(),
+            engine_compat: String::new(),
         }
+    }
+
+    /// Create a PluginInfo for a user-installed local plugin.
+    pub fn new_local(id: &str, name: &str, version: &str, install_path: PathBuf) -> Self {
+        let mut info = Self::new(id, name, version);
+        info.origin = PluginOrigin::Local {
+            install_path,
+            installed_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        };
+        info
+    }
+
+    /// Create a PluginInfo for a map-bundled plugin.
+    pub fn new_bundled(
+        id: &str,
+        name: &str,
+        version: &str,
+        map_id: &str,
+        bundle_path: &str,
+        mandatory: bool,
+    ) -> Self {
+        let mut info = Self::new(id, name, version);
+        info.origin = PluginOrigin::Bundled {
+            map_id: map_id.to_string(),
+            bundle_path: bundle_path.to_string(),
+            mandatory,
+        };
+        info
     }
 }
 
@@ -212,6 +303,11 @@ pub trait Plugin: Send + Sync {
         Ok(())
     }
 
+    /// Optional: plugin can register subscribers on the EventBus during registration.
+    fn register_subscribers(&mut self, _bus: &mut EventBus) {
+        // default: no subscribers
+    }
+
     /// Get a metadata info struct for this plugin.
     fn info(&self) -> PluginInfo {
         PluginInfo {
@@ -223,7 +319,38 @@ pub trait Plugin: Send + Sync {
             required_permissions: self.permissions(),
             load_config: None,
             enabled: true,
+            origin: PluginOrigin::BuiltIn,
+            dependencies: Vec::new(),
+            engine_compat: String::new(),
         }
+    }
+}
+
+// ============================================================================
+// PluginEventInjector
+// ============================================================================
+
+pub struct PluginEventInjector {
+    bus: Arc<Mutex<EventBus>>,
+    plugin_id: String,
+}
+
+impl PluginEventInjector {
+    pub fn new(bus: Arc<Mutex<EventBus>>, plugin_id: &str) -> Self {
+        Self {
+            bus,
+            plugin_id: plugin_id.to_string(),
+        }
+    }
+
+    pub fn inject(
+        &self,
+        event_type: &str,
+        payload: serde_json::Value,
+        state: &sa_monopoly_domain::GameState,
+    ) {
+        let mut bus = self.bus.blocking_lock();
+        bus.publish_custom(event_type, &self.plugin_id, payload, state);
     }
 }
 
@@ -296,6 +423,7 @@ pub trait PluginRegistry: Send + Sync {
 #[derive(Default)]
 pub struct InMemoryPluginRegistry {
     plugins: HashMap<String, PluginEntry>,
+    pub event_bus: EventBus,
 }
 
 struct PluginEntry {
@@ -315,6 +443,7 @@ impl PluginRegistry for InMemoryPluginRegistry {
 
         let mut p = plugin;
         p.init().map_err(PluginError::InitFailed)?;
+        p.register_subscribers(&mut self.event_bus);
 
         self.plugins.insert(
             id,
@@ -532,14 +661,14 @@ impl PluginContentLoader {
 // DescriptorPlugin – wraps PluginDescriptor as a Plugin
 // ============================================================================
 
-struct DescriptorPlugin {
-    id: String,
-    version: String,
-    load_config: Option<DynamicLoadConfig>,
+pub struct DescriptorPlugin {
+    pub id: String,
+    pub version: String,
+    pub load_config: Option<DynamicLoadConfig>,
 }
 
 impl DescriptorPlugin {
-    fn from_descriptor(desc: &PluginDescriptor) -> Self {
+    pub fn from_descriptor(desc: &PluginDescriptor) -> Self {
         Self {
             id: desc.id.clone(),
             version: desc.version.clone(),
@@ -565,6 +694,9 @@ impl Plugin for DescriptorPlugin {
             required_permissions: PermissionSet::default_safe(),
             load_config: self.load_config.clone(),
             enabled: true,
+            origin: PluginOrigin::BuiltIn,
+            dependencies: Vec::new(),
+            engine_compat: String::new(),
         }
     }
 }
@@ -690,7 +822,7 @@ mod tests {
 
     #[test]
     fn test_plugin_loader_catalog() {
-        let mut registry = InMemoryPluginRegistry::default();
+        let registry = InMemoryPluginRegistry::default();
         let mut loader = PluginLoader::new(registry);
 
         let catalog = PluginCatalog {

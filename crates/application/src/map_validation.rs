@@ -183,8 +183,9 @@ impl MapValidator {
 #[cfg(test)]
 mod tests {
     use sa_monopoly_domain::{
-        BoardEdge, BoardGraph, Property, PropertyKind, Tile, TileKind, Teleporter,
+        BoardEdge, BoardGraph, Property, PropertyKind, Tile, Teleporter,
     };
+    use sa_monopoly_domain::tile::tile_types;
 
     use super::*;
 
@@ -197,11 +198,11 @@ mod tests {
         }
     }
 
-    fn make_tile(id: &str, kind: TileKind, linked_property_kind: Option<PropertyKind>) -> Tile {
+    fn make_tile(id: &str, kind: &str, linked_property_kind: Option<PropertyKind>) -> Tile {
         Tile {
             id: id.to_string(),
             name_key: format!("tile.{id}"),
-            kind,
+            kind: kind.to_string(),
             linked_property_kind,
         }
     }
@@ -226,8 +227,8 @@ mod tests {
     fn test_duplicate_tile_ids() {
         let board = make_board(
             vec![
-                make_tile("GO", TileKind::Start, None),
-                make_tile("GO", TileKind::Start, None), // duplicate
+                make_tile("GO", tile_types::START, None),
+                make_tile("GO", tile_types::START, None), // duplicate
             ],
             vec![],
             BoardGraph::default(),
@@ -246,7 +247,7 @@ mod tests {
         let board = make_board(
             vec![make_tile(
                 "P1",
-                TileKind::OrdinaryProperty,
+                tile_types::ORDINARY_PROPERTY,
                 Some(PropertyKind::Ordinary),
             )],
             vec![], // no matching property
@@ -264,7 +265,7 @@ mod tests {
     #[test]
     fn test_property_without_tile() {
         let board = make_board(
-            vec![make_tile("GO", TileKind::Start, None)],
+            vec![make_tile("GO", tile_types::START, None)],
             vec![make_property("P1", 200)], // P1 does not exist in tiles
             BoardGraph::default(),
         );
@@ -280,7 +281,7 @@ mod tests {
     #[test]
     fn test_negative_price() {
         let board = make_board(
-            vec![make_tile("P1", TileKind::OrdinaryProperty, Some(PropertyKind::Ordinary))],
+            vec![make_tile("P1", tile_types::ORDINARY_PROPERTY, Some(PropertyKind::Ordinary))],
             vec![make_property("P1", -100)],
             BoardGraph::default(),
         );
@@ -297,9 +298,9 @@ mod tests {
     fn test_disconnected_tile() {
         let board = make_board(
             vec![
-                make_tile("A", TileKind::Start, None),
-                make_tile("B", TileKind::OrdinaryProperty, Some(PropertyKind::Ordinary)),
-                make_tile("C", TileKind::OrdinaryProperty, Some(PropertyKind::Ordinary)),
+                make_tile("A", tile_types::START, None),
+                make_tile("B", tile_types::ORDINARY_PROPERTY, Some(PropertyKind::Ordinary)),
+                make_tile("C", tile_types::ORDINARY_PROPERTY, Some(PropertyKind::Ordinary)),
             ],
             vec![make_property("B", 100), make_property("C", 100)],
             BoardGraph {
@@ -328,9 +329,9 @@ mod tests {
     fn test_connected_graph_no_issues() {
         let board = make_board(
             vec![
-                make_tile("GO", TileKind::Start, None),
-                make_tile("P1", TileKind::OrdinaryProperty, Some(PropertyKind::Ordinary)),
-                make_tile("P2", TileKind::OrdinaryProperty, Some(PropertyKind::Ordinary)),
+                make_tile("GO", tile_types::START, None),
+                make_tile("P1", tile_types::ORDINARY_PROPERTY, Some(PropertyKind::Ordinary)),
+                make_tile("P2", tile_types::ORDINARY_PROPERTY, Some(PropertyKind::Ordinary)),
             ],
             vec![make_property("P1", 200), make_property("P2", 150)],
             BoardGraph {
@@ -368,9 +369,9 @@ mod tests {
     fn test_teleporter_connectivity() {
         let board = make_board(
             vec![
-                make_tile("GO", TileKind::Start, None),
-                make_tile("P1", TileKind::OrdinaryProperty, Some(PropertyKind::Ordinary)),
-                make_tile("Far", TileKind::OrdinaryProperty, Some(PropertyKind::Ordinary)),
+                make_tile("GO", tile_types::START, None),
+                make_tile("P1", tile_types::ORDINARY_PROPERTY, Some(PropertyKind::Ordinary)),
+                make_tile("Far", tile_types::ORDINARY_PROPERTY, Some(PropertyKind::Ordinary)),
             ],
             vec![make_property("P1", 200), make_property("Far", 300)],
             BoardGraph {
@@ -410,8 +411,8 @@ mod tests {
     fn test_economic_warning_present() {
         let board = make_board(
             vec![
-                make_tile("GO", TileKind::Start, None),
-                make_tile("P1", TileKind::OrdinaryProperty, Some(PropertyKind::Ordinary)),
+                make_tile("GO", tile_types::START, None),
+                make_tile("P1", tile_types::ORDINARY_PROPERTY, Some(PropertyKind::Ordinary)),
             ],
             vec![make_property("P1", 2000)],
             BoardGraph::default(),
@@ -425,7 +426,7 @@ mod tests {
     #[test]
     fn test_validate_ok_valid_board() {
         let board = make_board(
-            vec![make_tile("GO", TileKind::Start, None)],
+            vec![make_tile("GO", tile_types::START, None)],
             vec![],
             BoardGraph::default(),
         );
@@ -435,7 +436,7 @@ mod tests {
     #[test]
     fn test_validate_ok_invalid_board() {
         let board = make_board(
-            vec![make_tile("GO", TileKind::Start, None)],
+            vec![make_tile("GO", tile_types::START, None)],
             vec![make_property("P1", -100)],
             BoardGraph::default(),
         );
