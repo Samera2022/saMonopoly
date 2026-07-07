@@ -1,11 +1,10 @@
-use std::sync::OnceLock;
-
 use serde::{Deserialize, Serialize};
 
 use sa_monopoly_domain::GameState;
 
 use crate::commands::GameCommand;
 use crate::engine::GameEngine;
+use crate::event_bus::EventBus;
 use crate::events::GameEvent;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,8 +55,6 @@ impl crate::ports::RngService for BridgeRng {
 
 pub struct EngineBridge;
 
-static BROADCASTER: OnceLock<Box<dyn Fn(&BridgeResponse) + Send + Sync>> = OnceLock::new();
-
 impl EngineBridge {
     pub fn execute(request: BridgeRequest) -> BridgeResponse {
         let mut state = request.state;
@@ -70,16 +67,16 @@ impl EngineBridge {
         BridgeResponse { event, state }
     }
 
-    pub fn set_broadcaster(f: Box<dyn Fn(&BridgeResponse) + Send + Sync>) {
-        let _ = BROADCASTER.set(f);
-    }
-
-    pub fn execute_with_broadcast(request: BridgeRequest) -> BridgeResponse {
-        let response = Self::execute(request);
-        if let Some(broadcaster) = BROADCASTER.get() {
-            broadcaster(&response);
-        }
-        response
+    pub fn execute_with_bus(
+        request: BridgeRequest,
+        bus: &mut EventBus,
+    ) -> BridgeResponse {
+        let mut state = request.state;
+        let mut rng = BridgeRng::new(state.seed);
+        let event = GameEngine::execute(request.command, &mut state, &mut rng);
+        state.seed = rng.current_state();
+        bus.publish(event.clone(), &state);
+        BridgeResponse { event, state }
     }
 
     pub fn execute_json(input: &str) -> Result<String, String> {

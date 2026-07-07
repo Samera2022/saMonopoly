@@ -486,8 +486,8 @@ impl WebSocketServer {
                 let request: BridgeRequest = serde_json::from_str(payload)
                     .map_err(|e| format!("failed to deserialize command payload: {}", e))?;
 
-                // Execute the engine command (the internal broadcaster is also invoked).
-                let response = EngineBridge::execute_with_broadcast(request);
+                // Execute the engine command. State broadcasting is handled below via StateSync.
+                let response = EngineBridge::execute(request);
 
                 // Serialise the resulting state into JSON and broadcast it.
                 let state_json = serde_json::to_string(&response.state)

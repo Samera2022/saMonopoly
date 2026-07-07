@@ -58,18 +58,3 @@ pub enum GameEvent {
     // Bail
     BailPaid { player_id: String, amount: i64 },
 }
-
-pub trait EventBus<E> {
-    fn publish(&mut self, event: E);
-}
-
-#[derive(Default)]
-pub struct VecEventBus<E> {
-    pub events: Vec<E>,
-}
-
-impl<E> EventBus<E> for VecEventBus<E> {
-    fn publish(&mut self, event: E) {
-        self.events.push(event);
-    }
-}

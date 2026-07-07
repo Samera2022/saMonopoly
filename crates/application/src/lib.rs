@@ -5,6 +5,7 @@ pub mod config;
 pub mod economy;
 pub mod effects;
 pub mod engine;
+pub mod event_bus;
 pub mod events;
 pub mod ffi;
 pub mod game_session;
@@ -15,6 +16,7 @@ pub mod scheduler;
 pub mod session_sync;
 pub mod special;
 pub mod startup;
+pub mod subscribers;
 pub mod systems;
 pub mod turn_processor;
 

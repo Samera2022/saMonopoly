@@ -8,6 +8,7 @@ use crate::effects::EffectResolver;
 use crate::economy::EconomyService;
 use crate::events::GameEvent;
 use crate::movement::MovementService;
+use crate::event_bus::EventBus;
 
 /// Server-side card prices enforced by the engine.
 /// Any `BuyCard` command with a price deviating from these values is rejected,
@@ -875,5 +876,16 @@ impl GameEngine {
         if let Some(property) = state.board.property_mut(&auction.tile_id) {
             property.owner = Some(winner_id.clone());
         }
+    }
+
+    /// Execute a command and publish the resulting event through the EventBus.
+    pub fn execute_and_emit(
+        command: GameCommand,
+        state: &mut GameState,
+        rng: &mut dyn crate::ports::RngService,
+        bus: &mut EventBus,
+    ) {
+        let event = Self::execute(command, state, rng);
+        bus.publish(event, state);
     }
 }

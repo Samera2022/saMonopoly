@@ -1,8 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 
 use crate::discovery::{FileSystemPluginDiscovery, PluginDescriptor, PluginDiscovery};
+use sa_monopoly_application::event_bus::EventBus;
 
 // ============================================================================
 // Permission system
@@ -212,6 +216,11 @@ pub trait Plugin: Send + Sync {
         Ok(())
     }
 
+    /// Optional: plugin can register subscribers on the EventBus during registration.
+    fn register_subscribers(&mut self, _bus: &mut EventBus) {
+        // default: no subscribers
+    }
+
     /// Get a metadata info struct for this plugin.
     fn info(&self) -> PluginInfo {
         PluginInfo {
@@ -224,6 +233,34 @@ pub trait Plugin: Send + Sync {
             load_config: None,
             enabled: true,
         }
+    }
+}
+
+// ============================================================================
+// PluginEventInjector
+// ============================================================================
+
+pub struct PluginEventInjector {
+    bus: Arc<Mutex<EventBus>>,
+    plugin_id: String,
+}
+
+impl PluginEventInjector {
+    pub fn new(bus: Arc<Mutex<EventBus>>, plugin_id: &str) -> Self {
+        Self {
+            bus,
+            plugin_id: plugin_id.to_string(),
+        }
+    }
+
+    pub fn inject(
+        &self,
+        event_type: &str,
+        payload: serde_json::Value,
+        state: &sa_monopoly_domain::GameState,
+    ) {
+        let mut bus = self.bus.blocking_lock();
+        bus.publish_custom(event_type, &self.plugin_id, payload, state);
     }
 }
 
@@ -296,6 +333,7 @@ pub trait PluginRegistry: Send + Sync {
 #[derive(Default)]
 pub struct InMemoryPluginRegistry {
     plugins: HashMap<String, PluginEntry>,
+    pub event_bus: EventBus,
 }
 
 struct PluginEntry {
@@ -315,6 +353,7 @@ impl PluginRegistry for InMemoryPluginRegistry {
 
         let mut p = plugin;
         p.init().map_err(PluginError::InitFailed)?;
+        p.register_subscribers(&mut self.event_bus);
 
         self.plugins.insert(
             id,
@@ -690,7 +729,7 @@ mod tests {
 
     #[test]
     fn test_plugin_loader_catalog() {
-        let mut registry = InMemoryPluginRegistry::default();
+        let registry = InMemoryPluginRegistry::default();
         let mut loader = PluginLoader::new(registry);
 
         let catalog = PluginCatalog {
