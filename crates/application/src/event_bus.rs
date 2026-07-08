@@ -7,6 +7,7 @@ use tokio::sync::Mutex;
 
 use sa_monopoly_domain::GameState;
 use sa_monopoly_domain::event::AnyEvent as DomainAnyEvent;
+use crate::cancellable_event::CancellableEvent;
 use crate::command_handler::CommandHandlerRegistry;
 use crate::tile_behavior::TileBehaviorRegistry;
 use crate::ports::RngService;
@@ -74,6 +75,17 @@ pub enum EventAction {
 }
 
 // ---------------------------------------------------------------------------
+// PreEventAction
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub enum PreEventAction {
+    Continue,
+    Cancel(String),
+    Modify(serde_json::Value),
+}
+
+// ---------------------------------------------------------------------------
 // 2.4 EventSubscriber (sync)
 // ---------------------------------------------------------------------------
 
@@ -86,6 +98,26 @@ pub trait EventSubscriber: Send + Sync {
         SubscriberPriority::Last
     }
     fn on_event(&mut self, event: &AnyEvent, state: &GameState) -> EventAction;
+}
+
+// ---------------------------------------------------------------------------
+// PreEventHook
+// ---------------------------------------------------------------------------
+
+pub trait PreEventHook: Send + Sync {
+    fn id(&self) -> &str;
+    fn priority(&self) -> SubscriberPriority { SubscriberPriority::Normal }
+    fn on_pre_command(&mut self, command_type: &str, payload: &serde_json::Value, state: &GameState) -> PreEventAction;
+}
+
+// ---------------------------------------------------------------------------
+// PostEventHook
+// ---------------------------------------------------------------------------
+
+pub trait PostEventHook: Send + Sync {
+    fn id(&self) -> &str;
+    fn priority(&self) -> SubscriberPriority { SubscriberPriority::Normal }
+    fn on_post_command(&mut self, command_type: &str, state: &GameState, events: &[AnyEvent]);
 }
 
 // ---------------------------------------------------------------------------
@@ -177,6 +209,22 @@ pub(crate) struct AsyncSubscriberEntry {
 }
 
 // ---------------------------------------------------------------------------
+// Hook entries
+// ---------------------------------------------------------------------------
+
+pub(crate) struct PreHookEntry {
+    pub hook: Box<dyn PreEventHook>,
+    pub priority: SubscriberPriority,
+    pub registered_at: usize,
+}
+
+pub(crate) struct PostHookEntry {
+    pub hook: Box<dyn PostEventHook>,
+    pub priority: SubscriberPriority,
+    pub registered_at: usize,
+}
+
+// ---------------------------------------------------------------------------
 // 2.9 EventBus — the central engine hub
 // ---------------------------------------------------------------------------
 
@@ -188,6 +236,8 @@ pub struct EventBus {
     pub tile_behaviors: TileBehaviorRegistry,
     sorted: bool,
     custom_events: Vec<AnyEvent>,
+    pub(crate) pre_hooks: Vec<PreHookEntry>,
+    pub(crate) post_hooks: Vec<PostHookEntry>,
 }
 
 impl EventBus {
@@ -200,6 +250,8 @@ impl EventBus {
             tile_behaviors: TileBehaviorRegistry::new(),
             sorted: true,
             custom_events: Vec::new(),
+            pre_hooks: Vec::new(),
+            post_hooks: Vec::new(),
         }
     }
 
@@ -239,9 +291,29 @@ impl EventBus {
         });
     }
 
+    pub fn register_pre_hook(&mut self, hook: Box<dyn PreEventHook>) {
+        let priority = hook.priority();
+        self.pre_hooks.push(PreHookEntry { hook, priority, registered_at: self.pre_hooks.len() });
+        self.sorted = false;
+    }
+
+    pub fn register_post_hook(&mut self, hook: Box<dyn PostEventHook>) {
+        let priority = hook.priority();
+        self.post_hooks.push(PostHookEntry { hook, priority, registered_at: self.post_hooks.len() });
+        self.sorted = false;
+    }
+
+    pub fn unregister_pre_hook(&mut self, id: &str) {
+        self.pre_hooks.retain(|e| e.hook.id() != id);
+    }
+
+    pub fn unregister_post_hook(&mut self, id: &str) {
+        self.post_hooks.retain(|e| e.hook.id() != id);
+    }
+
     // ─── Core game loop entry points ───
 
-    /// Execute a command via the CommandHandlerRegistry
+    /// Execute a command via the CommandHandlerRegistry, with pre/post hook support
     pub fn execute_command(
         &mut self,
         command: DomainAnyEvent,
@@ -249,8 +321,49 @@ impl EventBus {
         rng: &mut dyn RngService,
     ) {
         let command_type = command.event_type().to_string();
-        // Use a raw pointer to split borrows: command_handlers (mutable)
-        // and self (mutable for the bus parameter) are different fields.
+
+        // 1. Extract payload for pre-hooks
+        let payload = match &command {
+            DomainAnyEvent::Typed { payload, .. } => {
+                serde_json::from_str(payload.get()).unwrap_or(serde_json::Value::Null)
+            }
+            DomainAnyEvent::Custom { payload, .. } => payload.clone(),
+        };
+
+        // 2. Fire pre-hooks
+        let pre_action = self.fire_pre_hooks(&command_type, &payload, state);
+
+        // 3. Handle pre-hook result
+        let command = match pre_action {
+            PreEventAction::Cancel(reason) => {
+                self.publish_custom(
+                    "core:command_rejected",
+                    "core",
+                    serde_json::json!({
+                        "reason": reason,
+                        "cancelled_by_plugin": true,
+                        "command_type": command_type,
+                    }),
+                    state,
+                );
+                return;
+            }
+            PreEventAction::Modify(modified_payload) => {
+                // Rebuild as a Custom variant with the modified payload
+                DomainAnyEvent::Custom {
+                    event_type: command_type.clone(),
+                    source: command.source().to_string(),
+                    payload: modified_payload,
+                    timestamp: sa_monopoly_domain::event::timestamp_now(),
+                }
+            }
+            PreEventAction::Continue => command,
+        };
+
+        // 4. Record current event count so we can isolate new events for post-hooks
+        let prev_events_len = self.custom_events.len();
+
+        // 5. Dispatch via raw pointer to split borrows (same pattern as before)
         let handlers_ptr: *mut CommandHandlerRegistry = &mut self.command_handlers;
         // SAFETY: command_handlers is the only field mutated through dispatch().
         // The &mut self passed as bus does not alias command_handlers.
@@ -260,6 +373,79 @@ impl EventBus {
         if !dispatched {
             self.publish_error(&format!("unknown command: {command_type}"), state);
         }
+
+        // 6. Fire post-hooks with events produced by this command execution
+        let new_events: Vec<AnyEvent> = self.custom_events[prev_events_len..].to_vec();
+        self.fire_post_hooks(&command_type, state, &new_events);
+    }
+
+    // ─── Pre / Post hook helpers ───
+
+    /// Run all pre-hooks for the given command, returning the first non-Continue action.
+    /// Hooks are sorted by (priority, registered_at) before execution.
+    fn fire_pre_hooks(
+        &mut self,
+        command_type: &str,
+        payload: &serde_json::Value,
+        state: &GameState,
+    ) -> PreEventAction {
+        // Stable sort by priority then registration order
+        self.pre_hooks.sort_by_key(|e| (e.priority, e.registered_at));
+
+        for entry in &mut self.pre_hooks {
+            let action = entry.hook.on_pre_command(command_type, payload, state);
+            match action {
+                PreEventAction::Continue => continue,
+                other => return other,
+            }
+        }
+        PreEventAction::Continue
+    }
+
+    /// Notify all post-hooks about events produced by a completed command.
+    /// Hooks are sorted by (priority, registered_at) before execution.
+    fn fire_post_hooks(
+        &mut self,
+        command_type: &str,
+        state: &GameState,
+        events: &[AnyEvent],
+    ) {
+        // Stable sort by priority then registration order
+        self.post_hooks.sort_by_key(|e| (e.priority, e.registered_at));
+
+        for entry in &mut self.post_hooks {
+            entry.hook.on_post_command(command_type, state, events);
+        }
+    }
+
+    /// 在命令处理器内部触发 Pre-Event 钩子，返回一个 CancellableEvent。
+    /// 钩子可以取消事件或修改 payload。
+    pub fn fire_command_pre_hook(
+        &mut self,
+        hook_event_type: &str,
+        payload: serde_json::Value,
+        state: &GameState,
+    ) -> CancellableEvent {
+        let mut cancellable = CancellableEvent::new(hook_event_type, "core", payload.clone());
+        // 遍历 pre_hooks，让它们检查/修改这个可取消事件
+        for entry in &mut self.pre_hooks {
+            let action = entry.hook.on_pre_command(hook_event_type, &cancellable.payload, state);
+            match action {
+                PreEventAction::Cancel(reason) => {
+                    cancellable.set_canceled(true);
+                    // 将取消原因保存到 payload 中
+                    if let serde_json::Value::Object(ref mut map) = cancellable.payload {
+                        map.insert("cancel_reason".to_string(), serde_json::Value::String(reason));
+                    }
+                    break;
+                }
+                PreEventAction::Modify(modified_payload) => {
+                    cancellable.payload = modified_payload;
+                }
+                PreEventAction::Continue => {}
+            }
+        }
+        cancellable
     }
 
     /// Resolve a tile landing via the TileBehaviorRegistry

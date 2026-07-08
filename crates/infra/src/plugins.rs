@@ -308,6 +308,16 @@ pub trait Plugin: Send + Sync {
         // default: no subscribers
     }
 
+    /// Optional: plugin can register pre-event hooks.
+    fn register_pre_hooks(&mut self, _bus: &mut EventBus) {
+        // default: no pre-hooks
+    }
+
+    /// Optional: plugin can register post-event hooks.
+    fn register_post_hooks(&mut self, _bus: &mut EventBus) {
+        // default: no post-hooks
+    }
+
     /// Get a metadata info struct for this plugin.
     fn info(&self) -> PluginInfo {
         PluginInfo {

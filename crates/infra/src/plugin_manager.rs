@@ -193,6 +193,8 @@ impl PluginManager {
 
         // Register subscribers, commands, tile behaviors
         managed.plugin.register_subscribers(bus);
+        managed.plugin.register_pre_hooks(bus);
+        managed.plugin.register_post_hooks(bus);
         
         // Mark as active
         managed.status = PluginStatus::Active;

@@ -1,4 +1,5 @@
 pub mod bridge;
+pub mod cancellable_event;
 pub mod cards;
 pub mod command_handler;
 pub mod example_plugins;

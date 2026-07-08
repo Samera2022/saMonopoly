@@ -1255,13 +1255,36 @@ fn handle_pay_rent(
     // Calculate rent
     let rent_amount = property.current_rent();
 
-    // Check affordability
+    // ★ Pre-Event: 让插件决定是否/如何收租
+    let pre = bus.fire_command_pre_hook("core:rent_due", serde_json::json!({
+        "player_id": cmd.player_id.clone(),
+        "owner_id": owner_id.clone(),
+        "amount": rent_amount,
+        "tile_id": cmd.tile_id.clone(),
+    }), state);
+
+    if pre.is_canceled() {
+        bus.publish_custom("core:command_rejected", "core",
+            serde_json::json!({
+                "reason": "cancelled_by_plugin",
+                "plugin_event": "core:rent_due",
+                "cancel_reason": pre.payload.get("cancel_reason"),
+            }), state);
+        return;
+    }
+
+    // 插件可能修改了金额
+    let final_amount = pre.payload.get("amount")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(rent_amount);
+
+    // Check affordability (using final_amount)
     if let Some(player) = state.players.get(active_idx) {
-        if !player.can_afford(rent_amount) {
+        if !player.can_afford(final_amount) {
             bus.publish_custom(
                 "core:command_rejected",
                 "core",
-                serde_json::json!({ "reason": format!("Cannot afford rent: need ${rent_amount}, have ${}", player.cash) }),
+                serde_json::json!({ "reason": format!("Cannot afford rent: need ${final_amount}, have ${}", player.cash) }),
                 state,
             );
             return;
@@ -1281,10 +1304,10 @@ fn handle_pay_rent(
 
     // Execute rent transfer: deduct from payer, add to owner
     if let Some(player) = state.players.get_mut(active_idx) {
-        player.cash -= rent_amount;
+        player.cash -= final_amount;
     }
     if let Some(owner) = state.players.get_mut(owner_idx) {
-        owner.cash += rent_amount;
+        owner.cash += final_amount;
     }
 
     // Publish rent paid event
@@ -1294,13 +1317,13 @@ fn handle_pay_rent(
         serde_json::json!({
             "from_player_id": cmd.player_id.clone(),
             "to_player_id": owner_id.clone(),
-            "amount": rent_amount,
+            "amount": final_amount,
             "tile_id": cmd.tile_id.clone(),
             "_state_diff": {
                 "from_player_id": cmd.player_id.clone(),
                 "to_player_id": owner_id.clone(),
-                "from_cash_change": -(rent_amount as i64),
-                "to_cash_change": rent_amount as i64,
+                "from_cash_change": -(final_amount as i64),
+                "to_cash_change": final_amount as i64,
             },
         }),
         state,
