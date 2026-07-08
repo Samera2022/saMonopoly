@@ -25,15 +25,13 @@ impl EventSubscriber for BridgeBroadcaster {
 
     fn on_event(&mut self, event: &AnyEvent, state: &GameState) -> EventAction {
         // Forward custom events (including domain events wrapped as custom)
-        // to the bridge channel as BridgeResponse items
+        // to the bridge channel as BridgeResponse items.
+        // Events are flattened into the simple format Flutter expects.
         let event_type = event.event_type().to_string();
+        let mut flat = serde_json::Map::new();
+        flat.insert("event_type".to_string(), serde_json::Value::String(event_type));
         let response = BridgeResponse {
-            events: vec![sa_monopoly_domain::event::AnyEvent::Custom {
-                event_type,
-                source: event.source().to_string(),
-                payload: serde_json::json!({}),
-                timestamp: 0,
-            }],
+            events: vec![serde_json::Value::Object(flat)],
             state: state.clone(),
         };
         let _ = self.bridge_tx.try_send(response);

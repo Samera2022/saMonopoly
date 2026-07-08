@@ -18,6 +18,7 @@ import 'content_pack_loader.dart';
 import 'isometric_board.dart';
 import 'lottery_dialog.dart';
 import 'plugin_state.dart';
+import 'event_dispatcher.dart';
 
 // ============================================================================
 // Game state management (simple InheritedWidget)
@@ -192,6 +193,12 @@ class _GameScreenState extends State<GameScreen> {
   /// `null` if they haven't rolled yet this turn or the turn has ended.
   /// Used to prevent Buy/Upgrade without having just arrived at the tile.
   String? _landedTileIdThisTurn;
+
+  /// Whether the local player is currently executing a roll locally (via _onRoll).
+  /// Used to guard against rebroadcast echo in _handleRemoteRollEnd.
+  /// Unlike _isRollingDice, this is ONLY set by _onRoll, not by _handleRemoteRollStart,
+  /// so remote roll_end messages are still processed correctly.
+  bool _isRollInProgress = false;
 
   /// When non-null, the property detail overlay is shown for this tile.
   /// Using state-based overlay instead of showDialog for instant response.
@@ -491,8 +498,11 @@ class _GameScreenState extends State<GameScreen> {
             _handleRemoteMoveStart(playerIdx, tilePath);
             _networkService?.sendMessage(message);
           } else {
-            // Skip rebroadcast echo if we are the roller (already animating)
-            if (!_isAnimating) {
+            // Skip rebroadcast echo if we are the roller (already animating
+            // locally via _onRoll). Use _isRollInProgress to distinguish
+            // local roll from remote roll — _isAnimating is now kept true
+            // from roll_start through roll_end when movement follows.
+            if (!_isRollInProgress) {
               _handleRemoteMoveStart(playerIdx, tilePath);
             }
           }
@@ -613,7 +623,8 @@ class _GameScreenState extends State<GameScreen> {
   }
 
   /// Show final dice result + apply state (called when roll_end arrives).
-  /// Clears animation flags; move_start (if any) will re-set them.
+  /// Keeps _isAnimating true if movement will follow; clears it for jail rolls
+  /// or rejected rolls (no movement phase).
   ///
   /// IMPORTANT: The roll state has the player at the *destination* tile.
   /// We override the token position back to the pre-roll position so it
@@ -621,11 +632,29 @@ class _GameScreenState extends State<GameScreen> {
   void _handleRemoteRollEnd(
       int dice1, int dice2, Map<String, dynamic> state, Map<String, dynamic>? event) {
     if (!mounted) return;
+    // Ignore rebroadcast echo if we are currently executing a local roll.
+    // This prevents the host's relay from overwriting our animation state.
+    // NOTE: We use _isRollInProgress (not _isRollingDice) because _isRollingDice
+    // is also set by _handleRemoteRollStart for remote dice animations.
+    if (_isRollInProgress) return;
     _lastDiceResult = {'dice1': dice1, 'dice2': dice2};
+
+    // Determine whether a movement animation will follow.
+    // Movement is skipped when:
+    // 1. The roll was rejected (e.g. player in hospital, already rolled).
+    // 2. The player is in jail (jail roll to try to escape — no token move).
+    final activeIdx = (state['active_player_index'] as num?)?.toInt() ?? 0;
+    final eventType = event?['event_type'] as String? ?? '';
+    final isRejected = eventType == 'core:command_rejected';
+    final playersList = state['players'] as List<dynamic>? ?? [];
+    final jailTurns = activeIdx < playersList.length
+        ? ((playersList[activeIdx] as Map<String, dynamic>)['jail_turns'] as num?)?.toInt() ?? 0
+        : 0;
+    final isInJail = jailTurns > 0;
+    final hasMovement = !isRejected && !isInJail;
 
     // Keep the active player's token at the pre-roll position until
     // move_start begins the hop animation.
-    final activeIdx = (state['active_player_index'] as num?)?.toInt() ?? 0;
     final preRollPos = _gameState.players.isNotEmpty &&
             activeIdx < _gameState.players.length
         ? _gameState.players[activeIdx].tileId
@@ -645,7 +674,12 @@ class _GameScreenState extends State<GameScreen> {
         positionOverrides: overrides,
       );
       _isRollingDice = false;
-      _isAnimating = false; // cleared here; move_start re-sets if movement follows
+      // Only clear animation flag when no movement will follow (jail/rejected).
+      // Otherwise keep _isAnimating=true so the Roll button stays disabled
+      // until move_end arrives.
+      if (!hasMovement) {
+        _isAnimating = false;
+      }
     });
   }
 
@@ -678,6 +712,9 @@ class _GameScreenState extends State<GameScreen> {
   Future<void> _handleRemoteMoveStart(
       int playerIndex, List<dynamic> tilePath) async {
     if (!mounted || tilePath.isEmpty) return;
+    setState(() {
+      _isAnimating = true; // Keep Roll button disabled during movement
+    });
     for (var i = 0; i < tilePath.length; i++) {
       await Future.delayed(const Duration(milliseconds: 150));
       if (!mounted) return;
@@ -690,7 +727,7 @@ class _GameScreenState extends State<GameScreen> {
         );
       });
     }
-    // Keep _isAnimating true until move_end clears it
+    // _isAnimating stays true; move_end will clear it
   }
 
   /// Finalize movement on a remote client (called when move_end arrives).
@@ -1077,9 +1114,25 @@ class _GameScreenState extends State<GameScreen> {
     });
   }
 
+  // ---- Event dispatcher helper ---------------------------------------------
+
+  /// Build default [EventCallbacks] wired to this game screen's methods.
+  EventCallbacks _defaultCallbacks() {
+    return EventCallbacks(
+      addLog: _addLog,
+      showCardShop: _showCardShopDialog,
+      showLottery: () => _showLotteryPickerDialog(),
+      showChanceCard: _showChanceCardDialog,
+      showAuction: (tid, bid) => _showAuctionDialog(tid, bid),
+    );
+  }
+
   // ---- Game actions --------------------------------------------------------
 
   Future<void> _onRoll() async {
+    // Mark local roll in progress to guard against rebroadcast echo
+    _isRollInProgress = true;
+
     // 1. Broadcast roll_start to all peers immediately
     _broadcastRollStart();
 
@@ -1095,38 +1148,33 @@ class _GameScreenState extends State<GameScreen> {
       currentState: _currentState,
     );
 
-    final eventType = response.event['event_type'] as String? ?? '';
+    // 3b. Dispatch ALL events through EventDispatcher
+    final dispatchResult = EventDispatcher.dispatch(
+      response: response,
+      callbacks: _defaultCallbacks(),
+    );
 
-    // Hospital: skip without dice
-    if (eventType == 'CommandRejected') {
-      final reason = response.event['reason'] as String? ?? '';
-      if (reason == 'player_in_hospital') {
-        setState(() {
-          _currentState = response.state;
-          _gameState = _buildGameState(
-            response.state,
-            lastEvent: 'In hospital (skip turn)',
-          );
-          _isRollingDice = false;
-          _isAnimating = false;
-        });
-        _broadcastRollEnd(0, 0, response);
-        _addLog('In hospital — turn skipped');
-        return;
-      }
-    }
-
-    // Read dice values from the response event
-    final dice1 = (response.event['dice1'] as num?)?.toInt() ?? 0;
-    final dice2 = (response.event['dice2'] as num?)?.toInt() ?? 0;
+    final dice1 = dispatchResult.dice1;
+    final dice2 = dispatchResult.dice2;
     final steps = dice1 + dice2;
+    final isJailRoll = dispatchResult.isJailRoll;
     final is_seven = dice1 + dice2 == 7;
 
-    // Detect jail-specific events:
-    final isJailStillLocked =
-        eventType == 'DiceRolled' && response.event['consecutive'] == null;
-    final isJailReleased = eventType == 'PlayerReleasedFromJail';
-    final isJailRoll = isJailStillLocked || isJailReleased;
+    // Rejected / error: bail out without animation
+    if (dispatchResult.hadError) {
+      setState(() {
+        _currentState = response.state;
+        _gameState = _buildGameState(
+          response.state,
+          lastEvent: dispatchResult.lastLog,
+        );
+        _isRollingDice = false;
+        _isAnimating = false;
+      });
+      _broadcastRollEnd(dice1, dice2, response,
+          actionLog: dispatchResult.lastLog);
+      return;
+    }
 
     // 4. Continue dice animation with known values (total ~8 frames)
     for (var i = 0; i < 8; i++) {
@@ -1146,15 +1194,9 @@ class _GameScreenState extends State<GameScreen> {
     await Future.delayed(const Duration(milliseconds: 400));
     if (!mounted) return;
 
-    // 6. Build the log message and broadcast roll_end (includes log for peers)
-    final jailMsg6 = isJailStillLocked
-        ? ' (jail — need 7)'
-        : isJailReleased
-            ? ' (released from jail!)'
-            : '';
-    final rollLog = 'Rolled $dice1 + $dice2 = ${dice1 + dice2}$jailMsg6';
-    _broadcastRollEnd(dice1, dice2, response, actionLog: rollLog);
-    _addLog(rollLog);
+    // 6. Broadcast roll_end to network peers
+    _broadcastRollEnd(dice1, dice2, response,
+        actionLog: dispatchResult.lastLog);
 
     // 7. Apply final state locally (position already updated by engine).
     //    Override the token position back to pre-roll so it doesn't
@@ -1178,7 +1220,7 @@ class _GameScreenState extends State<GameScreen> {
       _currentState = response.state;
       _gameState = _buildGameState(
         response.state,
-        lastEvent: rollLog,
+        lastEvent: dispatchResult.lastLog,
         diceResult: {'dice1': dice1, 'dice2': dice2},
         positionOverrides: {activeIdx: currentPos},
       );
@@ -1254,8 +1296,34 @@ class _GameScreenState extends State<GameScreen> {
         if (maxLevel > 0 && currentLevel < maxLevel) {
           _showUpgradePropertyDialog(playerPos, property);
         }
+      } else {
+        // Landed on another player's property → auto-pay rent
+        await _autoPayRent(playerPos);
       }
     }
+    // Local roll fully complete — allow remote roll_end to be processed
+    _isRollInProgress = false;
+  }
+
+  /// Automatically pay rent when landing on a property owned by another player.
+  /// Sends a `pay_rent` command to the Rust engine for authoritative deduction.
+  Future<void> _autoPayRent(String tileId) async {
+    final response = await _bridgeClient.executeCommand(
+      command: BridgeCommand.payRent(tileId),
+      currentState: _currentState,
+    );
+    final r = EventDispatcher.dispatch(
+      response: response,
+      callbacks: _defaultCallbacks(),
+    );
+    setState(() {
+      _currentState = response.state;
+      _gameState = _buildGameState(
+        response.state,
+        lastEvent: r.lastLog,
+      );
+    });
+    _syncAfterAction(response, actionLog: r.lastLog);
   }
 
   /// Resolve the effect of the tile the active player landed on.
@@ -1327,47 +1395,71 @@ class _GameScreenState extends State<GameScreen> {
       command: BridgeCommand.buyCard(cardId, price),
       currentState: _currentState,
     );
-    final eventType = response.event['event_type'] as String? ?? '';
-    final accepted = eventType == 'CardBought';
+    final r = EventDispatcher.dispatch(
+      response: response,
+      callbacks: _defaultCallbacks(),
+    );
     setState(() {
       _currentState = response.state;
       _gameState = _buildGameState(
         response.state,
-        lastEvent: accepted ? 'Bought $cardId' : 'Purchase rejected',
+        lastEvent: r.lastLog,
       );
     });
-    if (accepted) {
-      _syncAfterAction(response, actionLog: 'Bought card: $cardId');
-    } else {
-      final reason = response.event['reason'] as String? ?? 'unknown';
-      _syncAfterAction(response, actionLog: 'Card purchase rejected: $reason');
-    }
+    _syncAfterAction(response, actionLog: r.lastLog);
+  }
+
+  /// Pay bail to get out of jail early.
+  Future<void> _onPayBail() async {
+    final response = await _bridgeClient.executeCommand(
+      command: BridgeCommand.payBail(),
+      currentState: _currentState,
+    );
+    final r = EventDispatcher.dispatch(
+      response: response,
+      callbacks: _defaultCallbacks(),
+    );
+    setState(() {
+      _currentState = response.state;
+      _gameState = _buildGameState(
+        response.state,
+        lastEvent: r.lastLog,
+      );
+    });
+    _syncAfterAction(response, actionLog: r.lastLog);
   }
 
   Future<void> _onUseCard(String cardId) async {
     final response = await _bridgeClient.executeCommand(
-      command: BridgeCommand(type: 'UseCard', params: {'card_id': cardId}),
+      command: BridgeCommand.useCard(cardId),
       currentState: _currentState,
+    );
+    final r = EventDispatcher.dispatch(
+      response: response,
+      callbacks: _defaultCallbacks(),
     );
     setState(() {
       _currentState = response.state;
-      _gameState = _buildGameState(response.state, lastEvent: 'Used $cardId');
+      _gameState = _buildGameState(response.state, lastEvent: r.lastLog);
     });
-    _syncAfterAction(response, actionLog: 'Used card: $cardId');
+    _syncAfterAction(response, actionLog: r.lastLog);
   }
 
   Future<void> _onBuyLotteryTicket(int number) async {
     final response = await _bridgeClient.executeCommand(
-      command: BridgeCommand(
-          type: 'BuyLotteryTicket', params: {'number': number}),
+      command: BridgeCommand.buyLotteryTicket(number),
       currentState: _currentState,
+    );
+    final r = EventDispatcher.dispatch(
+      response: response,
+      callbacks: _defaultCallbacks(),
     );
     setState(() {
       _currentState = response.state;
       _gameState =
-          _buildGameState(response.state, lastEvent: 'Lottery #$number');
+          _buildGameState(response.state, lastEvent: r.lastLog);
     });
-    _syncAfterAction(response, actionLog: 'Bought lottery ticket #$number');
+    _syncAfterAction(response, actionLog: r.lastLog);
   }
 
   Future<void> _showCardShopDialog() async {
@@ -1446,7 +1538,11 @@ class _GameScreenState extends State<GameScreen> {
       if (playerIdx < players.length) {
         final player = Map<String, dynamic>.from(players[playerIdx]);
         player['position'] = 'jail';
-        player['jail_turns'] = 3;
+        // Apply bail-abuse penalty: if bail was used before, add 1 turn
+        final abuseCount = (_currentState['bail_abuse_count'] as num?)?.toInt() ?? 0;
+        final extra = abuseCount > 0 ? 1 : 0;
+        player['jail_turns'] = 3 + extra;
+        _currentState['bail_abuse_count'] = 0; // Reset after applying
         players[playerIdx] = player;
         _currentState['players'] = players;
         _gameState = _buildGameState(_currentState, lastEvent: 'Sent to jail');
@@ -1578,18 +1674,21 @@ class _GameScreenState extends State<GameScreen> {
       command: BridgeCommand.endTurn(),
       currentState: _currentState,
     );
+    final r = EventDispatcher.dispatch(
+      response: response,
+      callbacks: _defaultCallbacks(),
+    );
     _lastDiceResult = {}; // Clear dice display on turn end
     setState(() {
       _currentState = response.state;
       _gameState = _buildGameState(
         response.state,
-        lastEvent: 'Turn ended',
+        lastEvent: r.lastLog,
       );
       _rollsRemainingThisTurn = 1;
       _landedTileIdThisTurn = null;
     });
-    _syncAfterAction(response,
-        actionLog: 'Turn ${_gameState.currentTurn} — Player ${_gameState.activePlayerIndex + 1}\'s turn');
+    _syncAfterAction(response, actionLog: r.lastLog);
   }
 
   Future<void> _onBuyProperty(String tileId) async {
@@ -1597,14 +1696,18 @@ class _GameScreenState extends State<GameScreen> {
       command: BridgeCommand.buyProperty(tileId),
       currentState: _currentState,
     );
+    final r = EventDispatcher.dispatch(
+      response: response,
+      callbacks: _defaultCallbacks(),
+    );
     setState(() {
       _currentState = response.state;
       _gameState = _buildGameState(
         response.state,
-        lastEvent: 'Bought $tileId',
+        lastEvent: r.lastLog,
       );
     });
-    _syncAfterAction(response, actionLog: 'Player bought $tileId');
+    _syncAfterAction(response, actionLog: r.lastLog);
   }
 
   Future<void> _onUpgradeProperty(String tileId) async {
@@ -1612,14 +1715,18 @@ class _GameScreenState extends State<GameScreen> {
       command: BridgeCommand.upgradeProperty(tileId),
       currentState: _currentState,
     );
+    final r = EventDispatcher.dispatch(
+      response: response,
+      callbacks: _defaultCallbacks(),
+    );
     setState(() {
       _currentState = response.state;
       _gameState = _buildGameState(
         response.state,
-        lastEvent: 'Upgraded $tileId',
+        lastEvent: r.lastLog,
       );
     });
-    _syncAfterAction(response, actionLog: 'Player upgraded $tileId');
+    _syncAfterAction(response, actionLog: r.lastLog);
   }
 
   /// Show a detailed property information dialog using state-based overlay.
@@ -2417,6 +2524,15 @@ class _GameScreenState extends State<GameScreen> {
     final canAct = _isLocalPlayersTurn && !_isAnimating;
     final canRoll = canAct && _rollsRemainingThisTurn > 0;
 
+    // Check if the active player is in jail (show bail button)
+    final players = _currentState['players'] as List<dynamic>? ?? [];
+    final activeIdx = _gameState.activePlayerIndex;
+    final jailTurns = activeIdx < players.length
+        ? ((players[activeIdx] as Map<String, dynamic>)['jail_turns'] as num?)?.toInt() ?? 0
+        : 0;
+    final isInJail = jailTurns > 0;
+    final bailAmount = jailTurns * 50;
+
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2428,6 +2544,14 @@ class _GameScreenState extends State<GameScreen> {
               ? 'Roll ($_rollsRemainingThisTurn)'
               : 'Roll'),
         ),
+        if (isInJail) ...[
+          const SizedBox(height: 4),
+          OutlinedButton.icon(
+            onPressed: canAct ? _onPayBail : null,
+            icon: const Icon(Icons.monetization_on, size: 18),
+            label: Text('Pay Bail (\$$bailAmount)'),
+          ),
+        ],
         const SizedBox(height: 4),
         OutlinedButton.icon(
           onPressed: canAct ? () => _showTradeDialog() : null,

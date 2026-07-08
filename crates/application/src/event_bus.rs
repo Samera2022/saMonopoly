@@ -332,7 +332,7 @@ impl EventBus {
             return;
         };
 
-        // 2. Collect events for bridge response
+        // 2. Collect event for bridge response (clone of original)
         self.custom_events.push(event.clone());
 
         // 3. Sort subscribers by priority (stable sort preserves registration order)
@@ -344,22 +344,37 @@ impl EventBus {
         }
 
         // 4. Dispatch to sync subscribers with interested_types filtering
+        //    Track modifications: each Modify chains onto the next subscriber,
+        //    and the final modified event replaces the last entry in custom_events.
+        let mut modified_event = event;
+        let mut was_modified = false;
         for entry in &mut self.subscribers {
             let types = entry.subscriber.interested_types();
-            if !types.is_empty() && !types.contains(&event.event_type.as_str()) {
+            if !types.is_empty() && !types.contains(&modified_event.event_type.as_str()) {
                 continue;
             }
-            match entry.subscriber.on_event(&event, state) {
+            match entry.subscriber.on_event(&modified_event, state) {
                 EventAction::Continue => {}
                 EventAction::Consume => break,
-                EventAction::Modify(_) => break,
+                EventAction::Modify(modified) => {
+                    modified_event = modified;
+                    was_modified = true;
+                }
             }
         }
 
-        // 5. Dispatch to async subscribers (fire-and-forget)
+        // 4b. If any subscriber modified the event, replace the last entry
+        //     in custom_events so the bridge sees the modified version.
+        if was_modified {
+            if let Some(last) = self.custom_events.last_mut() {
+                *last = modified_event.clone();
+            }
+        }
+
+        // 5. Dispatch to async subscribers (fire-and-forget) with the final event
         for entry in &self.async_subscribers {
             let sub_arc = Arc::clone(&entry.subscriber);
-            let event = event.clone();
+            let event = modified_event.clone();
             let state = state.clone();
             tokio::spawn(async move {
                 let mut guard = sub_arc.lock().await;

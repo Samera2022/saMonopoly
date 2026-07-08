@@ -46,10 +46,13 @@ impl TurnProcessor {
         bus: &mut EventBus,
     ) {
         // Phase 1: Roll
+        let player_id = state.active_player()
+            .map(|p| p.id.clone())
+            .unwrap_or_default();
         let roll_cmd = AnyEvent::Custom {
             event_type: "core:command:roll".to_string(),
             source: "core".to_string(),
-            payload: serde_json::json!({}),
+            payload: serde_json::json!({ "player_id": player_id }),
             timestamp: 0,
         };
         bus.execute_command(roll_cmd, state, rng);
@@ -77,7 +80,7 @@ impl TurnProcessor {
         let end_cmd = AnyEvent::Custom {
             event_type: "core:command:end_turn".to_string(),
             source: "core".to_string(),
-            payload: serde_json::json!({}),
+            payload: serde_json::json!({ "player_id": player_id }),
             timestamp: 0,
         };
         bus.execute_command(end_cmd, state, rng);
