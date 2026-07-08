@@ -67,7 +67,16 @@ impl EventSubscriber for DiceStatsSubscriber {
             self.total_rolls, dice1, dice2, sum, self.sum_distribution,
         );
 
-        EventAction::Continue
+        // 在事件 payload 中添加 _plugin_msg 字段，以便 Flutter 端通过 Bridge 接收
+        let mut modified = event.clone();
+        if let serde_json::Value::Object(ref mut map) = modified.payload {
+            map.insert(
+                "_plugin_msg".to_string(),
+                serde_json::json!(format!("第{}次掷骰: {}+{}={}", self.total_rolls, dice1, dice2, sum)),
+            );
+        }
+
+        EventAction::Modify(modified)
     }
 }
 
@@ -79,6 +88,36 @@ impl EventSubscriber for DiceStatsSubscriber {
 // 1. 在地图中添加一个 tile_type="core:chance" 的格子（现有经典地图自带）
 // 2. 当玩家落在这个格子上时，会触发 handle_chance
 // 3. 终端会输出 [TreasureHunt] 日志
+
+/// 内部宝藏猎人订阅者 — 在 dice_rolled 事件中添加 _plugin_msg_treasure 字段
+struct TreasureHuntSubscriber;
+
+impl EventSubscriber for TreasureHuntSubscriber {
+    fn id(&self) -> &str {
+        "example:treasure_hunt"
+    }
+
+    fn interested_types(&self) -> Vec<&'static str> {
+        vec!["dice_rolled"]
+    }
+
+    fn priority(&self) -> SubscriberPriority {
+        SubscriberPriority::Late
+    }
+
+    fn on_event(&mut self, event: &event_bus::AnyEvent, _state: &GameState) -> EventAction {
+        // 在事件 payload 中添加 _plugin_msg_treasure 字段，以便 Flutter 端通过 Bridge 接收
+        let mut modified = event.clone();
+        if let serde_json::Value::Object(ref mut map) = modified.payload {
+            map.insert(
+                "_plugin_msg_treasure".to_string(),
+                serde_json::json!("treasure_hunt_dice_roll"),
+            );
+        }
+
+        EventAction::Modify(modified)
+    }
+}
 
 /// 注册宝藏猎人功能到 EventBus
 pub fn register_treasure_hunt(bus: &mut EventBus) {
@@ -122,7 +161,10 @@ pub fn register_treasure_hunt(bus: &mut EventBus) {
         )
         .expect("TreasureHunt tile behavior registration failed");
 
-    log::info!("[Plugin] TreasureHunt 已注册 — 注册了 example:treasure_chest 格子类型");
+    // 订阅 dice_rolled 事件，添加 _plugin_msg_treasure 字段到 payload
+    bus.subscribe(Box::new(TreasureHuntSubscriber));
+
+    log::info!("[Plugin] TreasureHunt 已注册 — 注册了 example:treasure_chest 格子类型和 dice_rolled 订阅者");
 }
 
 // ============================================================================

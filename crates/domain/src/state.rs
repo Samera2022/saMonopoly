@@ -43,12 +43,30 @@ pub struct GameState {
 }
 
 impl GameState {
+    /// Default number of jail turns when sent to jail.
+    pub const BASE_JAIL_TURNS: u32 = 3;
+
     pub fn active_player(&self) -> Option<&Player> {
         self.players.get(self.active_player_index)
     }
 
     pub fn active_player_mut(&mut self) -> Option<&mut Player> {
         self.players.get_mut(self.active_player_index)
+    }
+
+    /// Send the active player to jail.
+    /// Applies the bail-abuse penalty (+1 turn) if `bail_abuse_count > 0`,
+    /// then resets the abuse counter (one-time penalty, not cumulative).
+    /// Returns the actual number of jail turns set.
+    pub fn send_active_player_to_jail(&mut self, jail_tile_id: &str) -> u32 {
+        let extra = if self.bail_abuse_count > 0 { 1 } else { 0 };
+        let turns = Self::BASE_JAIL_TURNS + extra;
+        if let Some(player) = self.players.get_mut(self.active_player_index) {
+            player.position = jail_tile_id.to_string();
+            player.jail_turns = turns;
+        }
+        self.bail_abuse_count = 0;
+        turns
     }
 
     /// Returns the `team_id` of the currently active player, if any.
