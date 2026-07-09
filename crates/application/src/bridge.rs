@@ -160,6 +160,13 @@ impl EngineBridge {
         register_core_commands(&mut bus.command_handlers);
         register_core_tile_behaviors(&mut bus.tile_behaviors);
         register_core_subscribers(&mut bus);
+
+        // ★ TODO: Hot-plug injection of active external plugins.
+        //   In the future this will call:
+        //     PluginManager::global_active().register_into_bus(&mut bus);
+        //   For now, plugins_dir env var is reserved as an extension point:
+        //     if let Ok(plugin_state) = std::env::var("SA_MONOPOLY_PLUGINS_DIR") { … }
+
         let response = Self::execute(request, &mut bus);
         serde_json::to_string_pretty(&response).map_err(|err| err.to_string())
     }
