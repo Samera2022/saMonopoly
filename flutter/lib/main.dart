@@ -854,11 +854,18 @@ class _GameScreenState extends State<GameScreen> {
       'prop_22': ['prop_21'],
     };
 
+    // Preset property owners from map JSON "properties[].owner".
+    // Key: tile_id, Value: player_id (e.g. "player_0").
+    // Read from the map JSON's "properties" array at load time.
+    // Until the content pipeline is fully connected, preset owners are empty.
+    const presetOwners = <String, String>{};
+
     // Build properties from tiles using classic pricing
     final properties = <Map<String, dynamic>>[];
     for (final tile in tileSource) {
       final tid = tile['id'];
       final price = prices[tid] ?? 0;
+      final owner = presetOwners[tid]; // null → unowned
       if (tile['kind'] == 'OrdinaryProperty' && price > 0) {
         properties.add({
           'tile_id': tid,
@@ -867,7 +874,7 @@ class _GameScreenState extends State<GameScreen> {
           'base_price': price,
           'rent': <int>[],
           'upgrade_level': 0,
-          'owner': null,
+          'owner': owner,
           'is_mortgaged': false,
           'linked_targets': groups[tid] ?? <String>[],
         });
@@ -879,7 +886,7 @@ class _GameScreenState extends State<GameScreen> {
           'base_price': price,
           'rent': <int>[],
           'upgrade_level': 0,
-          'owner': null,
+          'owner': owner,
           'is_mortgaged': false,
           'linked_targets': <String>[],
         });

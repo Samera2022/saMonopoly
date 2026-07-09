@@ -46,9 +46,9 @@
     { "id": "prop_22",      "name_key": "tile.prop_22",       "tile_type": "ordinary_property" }
   ],
   "properties": [
-    { "tile_id": "prop_1",  "base_price": 60,   "color_group": "brown" },
+    { "tile_id": "prop_1",  "base_price": 60,   "color_group": "brown",   "owner": "player_1" },
     { "tile_id": "prop_2",  "base_price": 60,   "color_group": "brown" },
-    { "tile_id": "rr_1",    "base_price": 200,  "color_group": "railroad" },
+    { "tile_id": "rr_1",    "base_price": 200,  "color_group": "railroad", "owner": "player_1" },
     { "tile_id": "prop_3",  "base_price": 100,  "color_group": "light_blue" },
     { "tile_id": "prop_4",  "base_price": 100,  "color_group": "light_blue" },
     { "tile_id": "prop_5",  "base_price": 120,  "color_group": "light_blue" },
