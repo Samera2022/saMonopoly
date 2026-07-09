@@ -1,19 +1,22 @@
 use sa_monopoly_domain::{CardDeck, CardDeckId, GameState};
 
-use crate::events::GameEvent;
+use crate::event_bus::AnyEvent;
+
+fn make_event(event_type: &str, payload: serde_json::Value) -> AnyEvent {
+    AnyEvent::new(event_type, "core", payload)
+}
 
 pub struct CardService;
 
 impl CardService {
     /// Draw a card from the specified deck, shuffling on first access.
     ///
-    /// Returns `Some(GameEvent::CardDrawn)` if a card was drawn, or `None` if the deck
-    /// is empty or not found.
+    /// Returns an event if a card was drawn, or `None` if the deck is empty or not found.
     pub fn draw_card(
         state: &mut GameState,
         deck_id: &CardDeckId,
         rng: &mut dyn crate::ports::RngService,
-    ) -> Option<GameEvent> {
+    ) -> Option<AnyEvent> {
         let player_id = state
             .active_player()
             .map(|p| p.id.clone())
@@ -27,12 +30,15 @@ impl CardService {
 
         let card = deck.draw()?;
 
-        Some(GameEvent::CardDrawn {
-            player_id,
-            card_id: card.id,
-            deck_id: deck_id.0.clone(),
-            effect_key: card.effect_key,
-        })
+        Some(make_event(
+            "core:card_drawn",
+            serde_json::json!({
+                "player_id": player_id,
+                "card_id": card.id,
+                "deck_id": deck_id.0,
+                "effect_key": card.effect_key,
+            }),
+        ))
     }
 }
 
@@ -52,7 +58,7 @@ impl LotteryService {
     pub fn buy_ticket(
         state: &mut GameState,
         number: u32,
-    ) -> Result<GameEvent, String> {
+    ) -> Result<AnyEvent, String> {
         Self::ensure_initialized(state);
 
         if number < 1 || number > 50 {
@@ -89,11 +95,14 @@ impl LotteryService {
         // Record the player's number choice
         lottery.player_numbers.insert(player_id.clone(), number);
 
-        Ok(GameEvent::LotteryTicketBought {
-            player_id,
-            number,
-            ticket_price,
-        })
+        Ok(make_event(
+            "core:lottery_ticket_bought",
+            serde_json::json!({
+                "player_id": player_id,
+                "number": number,
+                "ticket_price": ticket_price,
+            }),
+        ))
     }
 
     /// Execute a lottery draw: pick a random winning number, check all
@@ -101,7 +110,7 @@ impl LotteryService {
     pub fn execute_draw(
         state: &mut GameState,
         rng: &mut dyn crate::ports::RngService,
-    ) -> GameEvent {
+    ) -> AnyEvent {
         Self::ensure_initialized(state);
 
         let lottery = state.lottery_state.as_mut().unwrap();
@@ -135,11 +144,14 @@ impl LotteryService {
             // Schedule next draw
             lottery.next_draw_turn = current_turn + 15;
 
-            GameEvent::LotteryDrawResult {
-                winning_number,
-                winner: Some(winner_id.clone().unwrap()),
-                prize: jackpot,
-            }
+            make_event(
+                "core:lottery_draw_result",
+                serde_json::json!({
+                    "winning_number": winning_number,
+                    "winner": winner_id.clone().unwrap(),
+                    "prize": jackpot,
+                }),
+            )
         } else {
             // No winner: rollover with exponential growth
             lottery.consecutive_no_winner += 1;
@@ -149,11 +161,14 @@ impl LotteryService {
             // Schedule next draw
             lottery.next_draw_turn = current_turn + 15;
 
-            GameEvent::LotteryDrawResult {
-                winning_number,
-                winner: None,
-                prize: 0,
-            }
+            make_event(
+                "core:lottery_draw_result",
+                serde_json::json!({
+                    "winning_number": winning_number,
+                    "winner": null,
+                    "prize": 0,
+                }),
+            )
         }
     }
 }
@@ -165,16 +180,22 @@ impl StockMarketService {
     pub fn tick(
         state: &mut GameState,
         rng: &mut dyn crate::ports::RngService,
-    ) -> GameEvent {
+    ) -> AnyEvent {
         if let Some(market) = &mut state.stock_market {
             let mut rng_fn = || rng.next_u64();
             market.tick(&mut rng_fn);
-            GameEvent::StockMarketTick {
-                new_index: market.current_index,
-                price: market.current_price(),
-            }
+            make_event(
+                "core:stock_market_tick",
+                serde_json::json!({
+                    "new_index": market.current_index,
+                    "price": market.current_price(),
+                }),
+            )
         } else {
-            GameEvent::CommandRejected { reason: "stock_market_disabled".to_string() }
+            make_event(
+                "core:command_rejected",
+                serde_json::json!({ "reason": "stock_market_disabled" }),
+            )
         }
     }
 
@@ -183,32 +204,44 @@ impl StockMarketService {
         state: &mut GameState,
         player_id: &str,
         shares: u32,
-    ) -> GameEvent {
+    ) -> AnyEvent {
         let market = match &state.stock_market {
             Some(m) => m,
-            None => return GameEvent::CommandRejected { reason: "stock_market_disabled".to_string() },
+            None => return make_event(
+                "core:command_rejected",
+                serde_json::json!({ "reason": "stock_market_disabled" }),
+            ),
         };
         let price_per_share = market.current_price();
         let total_cost = price_per_share * shares as i64;
 
         let player = match state.players.iter_mut().find(|p| p.id == player_id) {
             Some(p) => p,
-            None => return GameEvent::CommandRejected { reason: "player_not_found".to_string() },
+            None => return make_event(
+                "core:command_rejected",
+                serde_json::json!({ "reason": "player_not_found" }),
+            ),
         };
 
         if player.cash < total_cost {
-            return GameEvent::CommandRejected { reason: "insufficient_funds".to_string() };
+            return make_event(
+                "core:command_rejected",
+                serde_json::json!({ "reason": "insufficient_funds" }),
+            );
         }
 
         player.cash -= total_cost;
         player.stock_shares += shares;
 
-        GameEvent::SharesBought {
-            player_id: player_id.to_string(),
-            shares,
-            total_cost,
-            price_per_share,
-        }
+        make_event(
+            "core:shares_bought",
+            serde_json::json!({
+                "player_id": player_id,
+                "shares": shares,
+                "total_cost": total_cost,
+                "price_per_share": price_per_share,
+            }),
+        )
     }
 
     /// Sell shares at current market price
@@ -216,32 +249,44 @@ impl StockMarketService {
         state: &mut GameState,
         player_id: &str,
         shares: u32,
-    ) -> GameEvent {
+    ) -> AnyEvent {
         let market = match &state.stock_market {
             Some(m) => m,
-            None => return GameEvent::CommandRejected { reason: "stock_market_disabled".to_string() },
+            None => return make_event(
+                "core:command_rejected",
+                serde_json::json!({ "reason": "stock_market_disabled" }),
+            ),
         };
         let price_per_share = market.current_price();
         let total_payout = price_per_share * shares as i64;
 
         let player = match state.players.iter_mut().find(|p| p.id == player_id) {
             Some(p) => p,
-            None => return GameEvent::CommandRejected { reason: "player_not_found".to_string() },
+            None => return make_event(
+                "core:command_rejected",
+                serde_json::json!({ "reason": "player_not_found" }),
+            ),
         };
 
         if player.stock_shares < shares {
-            return GameEvent::CommandRejected { reason: "insufficient_shares".to_string() };
+            return make_event(
+                "core:command_rejected",
+                serde_json::json!({ "reason": "insufficient_shares" }),
+            );
         }
 
         player.stock_shares -= shares;
         player.cash += total_payout;
 
-        GameEvent::SharesSold {
-            player_id: player_id.to_string(),
-            shares,
-            total_payout,
-            price_per_share,
-        }
+        make_event(
+            "core:shares_sold",
+            serde_json::json!({
+                "player_id": player_id,
+                "shares": shares,
+                "total_payout": total_payout,
+                "price_per_share": price_per_share,
+            }),
+        )
     }
 
     /// Get the total value of a player's stock portfolio at the current price

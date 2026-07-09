@@ -1,11 +1,11 @@
 pub mod bridge;
+pub mod cancellable_event;
 pub mod cards;
-pub mod commands;
+pub mod command_handler;
+pub mod example_plugins;
 pub mod config;
 pub mod economy;
-pub mod effects;
-pub mod engine;
-pub mod events;
+pub mod event_bus;
 pub mod ffi;
 pub mod game_session;
 pub mod map_validation;
@@ -13,10 +13,13 @@ pub mod movement;
 pub mod ports;
 pub mod scheduler;
 pub mod session_sync;
-pub mod special;
 pub mod startup;
+pub mod subscribers;
 pub mod systems;
+pub mod tile_behavior;
 pub mod turn_processor;
+
+pub mod builtin;
 
 #[cfg(test)]
 mod tests;

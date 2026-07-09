@@ -11,6 +11,7 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
 use sa_monopoly_application::bridge::{BridgeRequest, EngineBridge};
+use sa_monopoly_application::event_bus::EventBus;
 
 // ============================================================================
 // WebSocket configuration
@@ -95,6 +96,18 @@ pub enum NetworkMessage {
         code: u32,
         message: String,
     },
+    /// Host broadcasts current plugin list and enable states
+    PluginSync {
+        plugins: String, // JSON serialized Vec<PluginSyncEntry>
+    },
+    /// Client replies with plugin check result
+    PluginAck {
+        client_id: String,
+        ready: bool,
+        missing_plugins: Vec<String>,
+    },
+    /// Client requests plugin list from host (on joining)
+    PluginListRequest,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -367,16 +380,38 @@ pub struct WebSocketServer {
     session_manager: Arc<Mutex<SessionManager>>,
     /// Map of connected peers to their outbound message channels.
     connected_peers: Arc<Mutex<HashMap<SessionEndpoint, mpsc::UnboundedSender<String>>>>,
+    /// Event bus for executing commands.
+    event_bus: Arc<Mutex<EventBus>>,
+    /// Plugin manager for plugin sync (host only)
+    plugin_manager: Arc<Mutex<crate::plugin_manager::PluginManager>>,
+    /// Pending plugin acks from clients (host only)
+    pending_acks: Arc<Mutex<HashMap<String, (bool, Vec<String>)>>>,
 }
 
 impl WebSocketServer {
     /// Create a new `WebSocketServer`.
-    pub fn new(config: WebSocketConfig, session_manager: Arc<Mutex<SessionManager>>) -> Self {
+    pub fn new(
+        config: WebSocketConfig,
+        session_manager: Arc<Mutex<SessionManager>>,
+        plugin_manager: Arc<Mutex<crate::plugin_manager::PluginManager>>,
+    ) -> Self {
         Self {
             ws_config: config,
             session_manager,
             connected_peers: Arc::new(Mutex::new(HashMap::new())),
+            event_bus: Arc::new(Mutex::new(EventBus::new())),
+            plugin_manager,
+            pending_acks: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Broadcast the current plugin list to all connected peers.
+    pub async fn broadcast_plugin_list(&self) {
+        let pm = self.plugin_manager.lock().await;
+        let entries = pm.build_sync_entries();
+        let json = serde_json::to_string(&entries).unwrap_or_default();
+        let msg = NetworkMessage::PluginSync { plugins: json };
+        self.broadcast(&msg).await;
     }
 
     /// Start the server: bind to the configured address and begin accepting connections.
@@ -486,8 +521,9 @@ impl WebSocketServer {
                 let request: BridgeRequest = serde_json::from_str(payload)
                     .map_err(|e| format!("failed to deserialize command payload: {}", e))?;
 
-                // Execute the engine command (the internal broadcaster is also invoked).
-                let response = EngineBridge::execute_with_broadcast(request);
+                // Execute the engine command. State broadcasting is handled below via StateSync.
+                let mut bus = self.event_bus.lock().await;
+                let response = EngineBridge::execute(request, &mut *bus);
 
                 // Serialise the resulting state into JSON and broadcast it.
                 let state_json = serde_json::to_string(&response.state)
@@ -506,6 +542,23 @@ impl WebSocketServer {
                     endpoint.addr(),
                     network_msg
                 );
+            }
+            NetworkMessage::PluginSync { .. } => {
+                // Client received host's plugin list
+                eprintln!("[PluginSync] Received plugin list from host");
+                // The client would validate locally — for now just log
+            }
+            NetworkMessage::PluginAck { client_id, ready, missing_plugins } => {
+                eprintln!(
+                    "[PluginSync] Client {} ready: {}, missing: {:?}",
+                    client_id, ready, missing_plugins
+                );
+                let mut pending = self.pending_acks.lock().await;
+                pending.insert(client_id.clone(), (*ready, missing_plugins.clone()));
+            }
+            NetworkMessage::PluginListRequest => {
+                eprintln!("[PluginSync] Client requested plugin list");
+                self.broadcast_plugin_list().await;
             }
         }
 
@@ -815,7 +868,14 @@ impl LobbyHost {
     /// and wired together.
     pub fn new(config: WebSocketConfig) -> Self {
         let session_manager = Arc::new(Mutex::new(SessionManager::new()));
-        let server = Arc::new(WebSocketServer::new(config.clone(), session_manager.clone()));
+        let plugin_manager = Arc::new(Mutex::new(crate::plugin_manager::PluginManager::new(
+            std::path::PathBuf::from("plugins"),
+        )));
+        let server = Arc::new(WebSocketServer::new(
+            config.clone(),
+            session_manager.clone(),
+            plugin_manager,
+        ));
         Self {
             server,
             session_manager,

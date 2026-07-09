@@ -11,6 +11,7 @@ import 'map_models.dart';
 import 'map_repository.dart';
 import 'map_selection_screen.dart';
 import 'save_manager.dart';
+import 'plugin_state.dart';
 
 // ============================================================================
 // Map Manager Screen – manage maps, config, and saves
@@ -40,6 +41,8 @@ class _MapManagerScreenState extends State<MapManagerScreen> {
 
   // Save list for selected map
   List<SaveMeta> _savesForSelected = [];
+  // Plugin enable state: plugin_id → enabled
+  final Map<String, bool> _pluginEnabled = {};
 
   @override
   void initState() {
@@ -355,6 +358,10 @@ class _MapManagerScreenState extends State<MapManagerScreen> {
 
           // ── Config + Saves split ───────────────────────────────────
           _buildConfigAndSaves(meta, enabled, mapSaves),
+          const SizedBox(height: 24),
+
+          // ── Plugin section ──────────────────────────────────────────
+          _buildPluginSection(meta),
         ],
       ),
     );
@@ -676,6 +683,165 @@ class _MapManagerScreenState extends State<MapManagerScreen> {
               onPressed: () => _onDeleteSave(save.fileName),
               padding: EdgeInsets.zero,
               constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Plugin section for map detail ──────────────────────────────────
+
+  Widget _buildPluginSection(MapMeta meta) {
+    // Demo bundled plugins for this map
+    final bundledPlugins = [
+      const MapPluginRef(
+        id: 'economy_ext',
+        name: '经济扩展',
+        minVersion: '1.0.0',
+        mandatory: true,
+        source: 'bundled',
+      ),
+      const MapPluginRef(
+        id: 'special_events',
+        name: '特殊事件',
+        minVersion: '2.0.0',
+        mandatory: false,
+        source: 'bundled',
+      ),
+    ];
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.04),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white.withOpacity(0.06)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.extension_rounded,
+                  size: 18, color: Color(0xFFCE93D8)),
+              const SizedBox(width: 8),
+              const Text(
+                '插件',
+                style: TextStyle(
+                  color: Colors.white70,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          const Text(
+            '📦 地图自带插件',
+            style: TextStyle(
+                color: Colors.white54, fontSize: 12, fontWeight: FontWeight.w500),
+          ),
+          const SizedBox(height: 6),
+          ...bundledPlugins.map((p) => _buildPluginItem(p)),
+          const SizedBox(height: 8),
+          const Text(
+            '📂 本地插件',
+            style: TextStyle(
+                color: Colors.white54, fontSize: 12, fontWeight: FontWeight.w500),
+          ),
+          const SizedBox(height: 6),
+          _buildPluginItem(const MapPluginRef(
+            id: 'dice_stats',
+            name: '骰子统计',
+            source: 'external',
+          )),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPluginItem(MapPluginRef plugin) {
+    final isBundled = plugin.source == 'bundled';
+    final icon = isBundled ? Icons.inventory_2_rounded : Icons.folder_rounded;
+    // Initialize state if not set
+    _pluginEnabled.putIfAbsent(plugin.id, () => true);
+    final enabled = _pluginEnabled[plugin.id] ?? true;
+    final canToggle = !plugin.mandatory;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.03),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, size: 16, color: Colors.white38),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              plugin.name,
+              style: TextStyle(
+                color: Colors.white70,
+                fontSize: 12,
+                fontWeight: enabled ? FontWeight.normal : FontWeight.w300,
+              ),
+            ),
+          ),
+          if (plugin.mandatory)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFA726).withOpacity(0.15),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: const Text('● 必选',
+                  style: TextStyle(
+                      color: Color(0xFFFFA726),
+                      fontSize: 10,
+                      fontWeight: FontWeight.w600)),
+            ),
+          const SizedBox(width: 4),
+          // Compact toggle: small icon button instead of full-size Switch
+          GestureDetector(
+            onTap: canToggle ? () {
+              final newVal = !enabled;
+              setState(() {
+                _pluginEnabled[plugin.id] = newVal;
+                PluginState().setEnabled(plugin.id, newVal);
+              });
+            } : null,
+            child: Container(
+              width: 28,
+              height: 18,
+              decoration: BoxDecoration(
+                color: enabled
+                    ? const Color(0xFF43A047).withOpacity(0.20)
+                    : Colors.white.withOpacity(0.08),
+                borderRadius: BorderRadius.circular(9),
+                border: Border.all(
+                  color: enabled
+                      ? const Color(0xFF43A047).withOpacity(0.40)
+                      : Colors.white.withOpacity(0.15),
+                  width: 1,
+                ),
+              ),
+              child: Center(
+                child: Icon(
+                  canToggle
+                      ? (enabled ? Icons.check_circle : Icons.remove_circle_outline)
+                      : Icons.lock_outline,
+                  size: 12,
+                  color: enabled
+                      ? const Color(0xFF43A047)
+                      : canToggle
+                          ? Colors.white38
+                          : Colors.white24,
+                ),
+              ),
             ),
           ),
         ],

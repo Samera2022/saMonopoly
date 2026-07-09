@@ -460,7 +460,7 @@ impl Board {
 #[cfg(test)]
 mod tests {
     use crate::property::Property;
-    use crate::tile::{Tile, TileKind};
+    use crate::tile::{Tile, tile_types};
     use crate::types::Money;
 
     use super::*;
@@ -469,7 +469,7 @@ mod tests {
         Tile {
             id: id.to_string(),
             name_key: format!("tile.{}", id),
-            kind: TileKind::Start,
+            kind: tile_types::START.to_string(),
             linked_property_kind: None,
         }
     }
@@ -614,7 +614,7 @@ mod tests {
         Tile {
             id: id.to_string(),
             name_key: format!("tile.{}", id),
-            kind: TileKind::OrdinaryProperty,
+            kind: tile_types::ORDINARY_PROPERTY.to_string(),
             linked_property_kind: Some(crate::property::PropertyKind::Ordinary),
         }
     }
@@ -623,7 +623,7 @@ mod tests {
         Tile {
             id: id.to_string(),
             name_key: format!("tile.{}", id),
-            kind: TileKind::Chance,
+            kind: tile_types::CHANCE.to_string(),
             linked_property_kind: None,
         }
     }

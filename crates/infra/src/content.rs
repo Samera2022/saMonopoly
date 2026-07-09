@@ -452,6 +452,7 @@ mod tests {
                 allow_card_system: false,
                 auto_link_rent: false,
             },
+            plugins: vec![],
         };
 
         let pack = ContentPack::new("p1", "1.0.0").add_map(map);

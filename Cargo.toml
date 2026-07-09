@@ -4,6 +4,8 @@ members = [
   "crates/application",
   "crates/infra",
   "crates/cli",
+  "examples/dynlib_plugin",
+  "examples/wasm_plugin",
 ]
 resolver = "2"
 
