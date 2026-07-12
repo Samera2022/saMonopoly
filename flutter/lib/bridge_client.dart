@@ -145,6 +145,11 @@ class BridgeCommand {
           'seed': seed,
         },
       );
+
+  /// Execute one complete turn for the current AI-controlled active player.
+  /// All game logic runs on the Rust side; Flutter merely displays the events.
+  factory BridgeCommand.processAiTurn() =>
+      const BridgeCommand(type: 'core:command:process_ai_turn');
 }
 
 /// Bridge request – matches [crate::bridge::BridgeRequest] on the Rust side.

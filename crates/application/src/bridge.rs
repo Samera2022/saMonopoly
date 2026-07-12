@@ -7,6 +7,8 @@ use crate::event_bus::EventBus;
 use crate::builtin::commands::register_core_commands;
 use crate::builtin::tiles::register_core_tile_behaviors;
 use crate::startup::register_core_subscribers;
+use crate::turn_processor::{TurnProcessor, AiDecisionMaker};
+use crate::ports::RngService;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BridgeRequest {
@@ -204,9 +206,12 @@ impl EngineBridge {
     pub fn execute_json(input: &str) -> Result<String, String> {
         let request: BridgeRequest = serde_json::from_str(input).map_err(|err| err.to_string())?;
 
-        // Special case: create_game constructs a GameState from map data directly.
+        // Special cases handled outside the normal command pipeline
         if request.command_type == "core:command:create_game" {
             return Self::handle_create_game(request);
+        }
+        if request.command_type == "core:command:process_ai_turn" {
+            return Self::execute_ai_turn(request);
         }
 
         let mut bus = EventBus::new();
@@ -221,6 +226,40 @@ impl EngineBridge {
         //     PluginManager::global_active().register_into_bus(&mut bus);
 
         let response = Self::execute(request, &mut bus);
+        serde_json::to_string_pretty(&response).map_err(|err| err.to_string())
+    }
+
+    /// Execute one AI player's complete turn and return all events.
+    /// Called explicitly by Flutter when the active player is AI.
+    fn execute_ai_turn(request: BridgeRequest) -> Result<String, String> {
+        use crate::turn_processor::{TurnProcessor, AiDecisionMaker};
+        use crate::builtin::commands::register_core_commands;
+        use crate::builtin::tiles::register_core_tile_behaviors;
+        use crate::startup::register_core_subscribers;
+
+        let mut state: GameState = serde_json::from_value(request.state.clone())
+            .map_err(|e| format!("Invalid state: {e}"))?;
+        let mut bus = EventBus::new();
+        register_core_commands(&mut bus.command_handlers);
+        register_core_tile_behaviors(&mut bus.tile_behaviors);
+        register_core_subscribers(&mut bus);
+        let mut rng = BridgeRng::new(state.seed);
+        let mut ai = AiDecisionMaker;
+        TurnProcessor::process_turn_with_bus(&mut state, &mut rng, &mut ai, &mut bus);
+        state.seed = rng.current_state();
+        let app_events = bus.drain_custom_events();
+        let events: Vec<serde_json::Value> = app_events
+            .into_iter()
+            .map(|e| Self::flatten_event(
+                &sa_monopoly_domain::event::AnyEvent::Custom {
+                    event_type: e.event_type,
+                    source: e.source,
+                    payload: e.payload,
+                    timestamp: e.timestamp,
+                }
+            ))
+            .collect();
+        let response = BridgeResponse { events, state };
         serde_json::to_string_pretty(&response).map_err(|err| err.to_string())
     }
 

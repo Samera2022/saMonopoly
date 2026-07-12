@@ -24,7 +24,5 @@ pub mod plugin_controller;
 
 pub mod builtin;
 
-pub mod builtin;
-
 #[cfg(test)]
 mod tests;

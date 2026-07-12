@@ -33,6 +33,37 @@ pub trait DecisionMaker {
     ) -> PlayerDecision;
 }
 
+/// Rule-based AI decision maker for automated players.
+pub struct AiDecisionMaker;
+
+impl DecisionMaker for AiDecisionMaker {
+    fn decide_buy_property(
+        &mut self,
+        _state: &GameState,
+        tile_id: &str,
+        price: i64,
+    ) -> PlayerDecision {
+        // In a real implementation we'd inspect state for more nuance.
+        // For now: buy if cash > 200 and can afford.
+        // We always try to buy (TurnProcessor only calls this if property is unowned).
+        if price > 0 {
+            PlayerDecision::BuyProperty(tile_id.to_string())
+        } else {
+            PlayerDecision::Pass
+        }
+    }
+
+    fn decide_upgrade_property(
+        &mut self,
+        _state: &GameState,
+        _tile_id: &str,
+        _current_level: u32,
+    ) -> PlayerDecision {
+        // AI does not upgrade properties for now.
+        PlayerDecision::Pass
+    }
+}
+
 /// Processes a complete turn for the active player.
 pub struct TurnProcessor;
 

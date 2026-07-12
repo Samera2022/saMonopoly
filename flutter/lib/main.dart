@@ -1431,6 +1431,146 @@ class _GameScreenState extends State<GameScreen> {
       _landedTileIdThisTurn = null;
     });
     _syncAfterAction(response, actionLogs: r.logs);
+    // After ending the turn, if the next player is AI, auto-run their turn
+    if (_isActivePlayerAi && mounted) {
+      await _processAiTurn();
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // AI turn processing
+  // ═══════════════════════════════════════════════════════════════════
+
+  /// Check if the current active player is AI-controlled.
+  /// For host: player_0 is local, everything else is remote/AI.
+  /// For client: player_0 is remote, player_1+ is local.
+  bool get _isActivePlayerAi {
+    final players = _currentState['players'] as List<dynamic>? ?? [];
+    final idx = _gameState.activePlayerIndex;
+    if (idx >= players.length) return false;
+    final player = players[idx] as Map<String, dynamic>?;
+    return player?['is_ai'] == true || player?['is_llm_controlled'] == true;
+  }
+
+  /// Execute one complete turn for the AI-controlled active player.
+  /// Called after a human's action causes the turn to pass to an AI player.
+  Future<void> _processAiTurn() async {
+    if (!_isActivePlayerAi || !mounted) return;
+
+    final response = await _bridgeClient.executeCommand(
+      command: BridgeCommand.processAiTurn(),
+      currentState: _currentState,
+    );
+
+    // Dispatch all AI turn events through EventDispatcher.
+    // UI actions (CardShop, Lottery, etc.) are deferred until after movement.
+    final dispatchResult = EventDispatcher.dispatch(
+      response: response,
+      deferUiActions: true,
+    );
+
+    // Extract dice values for animation
+    final dice1 = dispatchResult.dice1;
+    final dice2 = dispatchResult.dice2;
+    final steps = dice1 + dice2;
+    final isJailRoll = dispatchResult.isJailRoll;
+
+    if (dispatchResult.hadError) {
+      setState(() {
+        _currentState = response.state;
+        _gameState = _buildGameState(
+          response.state,
+          lastEvent: dispatchResult.lastLog,
+        );
+      });
+      return;
+    }
+
+    // Animate dice (same as _onRoll but without network broadcast)
+    if (!isJailRoll && steps > 0) {
+      setState(() {
+        _isRollingDice = true;
+        _isAnimating = true;
+      });
+
+      for (var i = 0; i < 8; i++) {
+        await Future.delayed(const Duration(milliseconds: 60));
+        if (!mounted) return;
+        setState(() {
+          _animDice1 = 1 + (i * 3 + 1) % 6;
+          _animDice2 = 1 + (i * 7 + 3) % 6;
+        });
+      }
+      setState(() {
+        _animDice1 = dice1;
+        _animDice2 = dice2;
+      });
+      await Future.delayed(const Duration(milliseconds: 400));
+      if (!mounted) return;
+    }
+
+    // Apply final state
+    final activeIdx = _gameState.activePlayerIndex;
+    final currentPos = _gameState.players[activeIdx].tileId;
+    final rawTiles = (_currentState['board'] as Map<String, dynamic>?)?
+        ['tiles'] as List<dynamic>? ?? [];
+    final currentTileIdx = rawTiles.indexWhere((t) => t['id'] == currentPos);
+
+    final movementPath = <String>[];
+    if (!isJailRoll && rawTiles.isNotEmpty) {
+      for (var i = 1; i <= steps; i++) {
+        final idx = (currentTileIdx + i) % rawTiles.length;
+        movementPath.add(rawTiles[idx]['id'] as String);
+      }
+    }
+
+    setState(() {
+      _currentState = response.state;
+      _gameState = _buildGameState(
+        response.state,
+        lastEvent: dispatchResult.lastLog,
+        positionOverrides: {activeIdx: currentPos},
+      );
+      _isRollingDice = false;
+    });
+
+    if (isJailRoll) {
+      _isAnimating = false;
+    } else {
+      // Animate movement
+      if (movementPath.isNotEmpty) {
+        _isAnimating = true;
+        for (var i = 0; i < movementPath.length; i++) {
+          await Future.delayed(const Duration(milliseconds: 150));
+          if (!mounted) return;
+          setState(() {
+            _animatedPositions[activeIdx] = movementPath[i];
+            _gameState = _buildGameState(
+              _currentState,
+              positionOverrides: Map.of(_animatedPositions),
+            );
+          });
+        }
+        _animatedPositions.clear();
+      }
+      await Future.delayed(const Duration(milliseconds: 300));
+    }
+
+    // Display logs and execute deferred UI actions (dialogues etc.)
+    for (final log in dispatchResult.logs) {
+      _addLog(log);
+    }
+    for (final uiAction in dispatchResult.pendingUiActions) {
+      uiAction.execute();
+    }
+
+    _isAnimating = false;
+    setState(() {});
+
+    // If another AI player is next, chain to them
+    if (_isActivePlayerAi && mounted) {
+      await _processAiTurn();
+    }
   }
 
   Future<void> _onBuyProperty(String tileId) async {
