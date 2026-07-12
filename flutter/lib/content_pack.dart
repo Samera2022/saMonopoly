@@ -1,4 +1,5 @@
 import 'board_view.dart';
+import 'game_constants.dart';
 
 class ContentPackViewModel {
   final String id;
@@ -19,10 +20,10 @@ ContentPackViewModel sampleClassicPack() {
     board: BoardViewModel(
       mapName: 'Classic',
       tiles: [
-        BoardTileViewModel(id: 'start', name: 'Start', kind: 'Start'),
-        BoardTileViewModel(id: 'property_1', name: 'Property 1', kind: 'OrdinaryProperty'),
-        BoardTileViewModel(id: 'opportunity_1', name: 'Opportunity', kind: 'Chance'),
-        BoardTileViewModel(id: 'bank_1', name: 'Bank', kind: 'Bank'),
+        BoardTileViewModel(id: 'start', name: 'Start', kind: TileKindNames.start),
+        BoardTileViewModel(id: 'property_1', name: 'Property 1', kind: TileKindNames.ordinaryProperty),
+        BoardTileViewModel(id: 'opportunity_1', name: 'Opportunity', kind: TileKindNames.chance),
+        BoardTileViewModel(id: 'bank_1', name: 'Bank', kind: TileKindNames.bank),
       ],
     ),
   );

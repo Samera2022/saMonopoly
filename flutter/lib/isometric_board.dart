@@ -6,6 +6,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
 
 import 'board_view.dart';
+import 'game_constants.dart';
 
 // ============================================================================
 // Isometric Camera Controller
@@ -332,10 +333,7 @@ class IsometricBoardPainter extends CustomPainter {
 
     // Ownership color strip (lower half of diamond).
     // Shown for all ownable property types when owned.
-    if (ownerColor != null &&
-        (tile.kind == 'OrdinaryProperty' ||
-         tile.kind == 'SpecialProperty' ||
-         tile.kind == 'ExtensionProperty')) {
+    if (ownerColor != null && isOwnablePropertyKind(tile.kind)) {
       final ownerDiamond = Path()
         ..moveTo(center.dx, center.dy)             // center
         ..lineTo(center.dx + hw, center.dy)         // right
@@ -622,9 +620,7 @@ class MinimapPainter extends CustomPainter {
 
       if (ownerColor != null) {
         canvas.drawPath(path, Paint()..color = ownerColor.withOpacity(0.7));
-      } else if (tile.kind == 'OrdinaryProperty' ||
-                 tile.kind == 'SpecialProperty' ||
-                 tile.kind == 'ExtensionProperty') {
+      } else if (isOwnablePropertyKind(tile.kind)) {
         canvas.drawPath(path, Paint()..color = Colors.grey.withOpacity(0.35));
       } else {
         canvas.drawPath(path, Paint()..color = tile.color.withOpacity(0.3));

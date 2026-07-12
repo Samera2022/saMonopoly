@@ -43,7 +43,7 @@ impl EventSubscriber for DiceStatsSubscriber {
         vec!["dice_rolled"]
     }
 
-    fn on_event(&mut self, event: &crate::event_bus::AnyEvent, _state: &GameState) -> EventAction {
+    fn on_event(&mut self, event: &crate::event_bus::AnyEvent, _state: &mut GameState) -> EventAction {
         // 从 AnyEvent 结构体的 payload 字段中提取骰子数据
         let d1 = event.payload.get("dice1").and_then(|v| v.as_u64()).unwrap_or(0);
         let d2 = event.payload.get("dice2").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -259,7 +259,20 @@ mod tests {
         // ── 1. 创建测试用游戏状态 ──────────────────────────
         let mut state = GameState {
             board: Board {
-                tiles: vec![],
+                tiles: vec![
+                    sa_monopoly_domain::tile::Tile {
+                        id: "start".to_string(),
+                        name_key: "tile.start".to_string(),
+                        kind: "core:start".to_string(),
+                        linked_property_kind: None,
+                    },
+                    sa_monopoly_domain::tile::Tile {
+                        id: "prop_1".to_string(),
+                        name_key: "tile.prop_1".to_string(),
+                        kind: "core:ordinary_property".to_string(),
+                        linked_property_kind: Some(sa_monopoly_domain::property::PropertyKind::Ordinary),
+                    },
+                ],
                 properties: vec![],
                 graph: Default::default(),
                 auto_link_rent: false,
@@ -292,6 +305,7 @@ mod tests {
             group_rent_enabled: false,
             lottery_state: None,
             bail_abuse_count: 0,
+            pending_events: vec![],
         };
 
         // ── 2. 添加一个测试用的 Treasure 格子 ──────────────
@@ -380,6 +394,7 @@ mod hook_tests {
         let mut bus = EventBus::new();
         register_core_commands(&mut bus.command_handlers);
         register_core_tile_behaviors(&mut bus.tile_behaviors);
+        bus.subscribe(Box::new(crate::subscribers::GameLogicHandler));
         let state = GameState {
             board: Board {
                 tiles: vec![
@@ -402,6 +417,7 @@ mod hook_tests {
             decks: vec![], stock_market: None, active_auction: None,
             consecutive_doubles: 0, max_upgrade_level: 3, extension_upgrade_enabled: false,
             group_rent_enabled: false, lottery_state: None, bail_abuse_count: 0,
+            pending_events: vec![],
         };
         (bus, state)
     }
@@ -440,7 +456,7 @@ mod hook_tests {
     }
 
     /// [Handler 级 Pre-Event Modify] DoubleRentPlugin 翻倍租金
-    /// 理论输出: player_1 cash=980 (1000-20) | player_2 cash=520 (500+20) | rent_paid.amount=20
+    /// 理论输出: player_1 cash=980 (1000-20) | player_2 cash=520 (500+20) | landed_on_owned_property.amount=20
     #[test]
     fn test_handler_doubles_rent() {
         let _ = env_logger::builder().is_test(true).filter_level(log::LevelFilter::Info).try_init();
@@ -453,7 +469,7 @@ mod hook_tests {
         let events = bus.drain_custom_events();
         assert_eq!(state.players[0].cash, 980);
         assert_eq!(state.players[1].cash, 520);
-        let rp = events.iter().find(|e| e.event_type == "core:rent_paid");
+        let rp = events.iter().find(|e| e.event_type == "core:landed_on_owned_property");
         assert!(rp.is_some());
         assert_eq!(rp.unwrap().payload.get("amount").and_then(|v| v.as_i64()), Some(20));
     }

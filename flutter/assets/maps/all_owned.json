@@ -1,0 +1,45 @@
+{
+  "id": "all_owned",
+  "version": "1.0.0",
+  "name_key": "map.all_owned.name",
+  "thumbnail": "thumbnail/classic.png",
+  "tiles": [
+    { "id": "start",        "name_key": "tile.start",         "tile_type": "start" },
+    { "id": "prop_1",       "name_key": "tile.prop_1",        "tile_type": "ordinary_property" },
+    { "id": "prop_2",       "name_key": "tile.prop_2",        "tile_type": "ordinary_property" },
+    { "id": "prop_3",       "name_key": "tile.prop_3",        "tile_type": "ordinary_property" },
+    { "id": "chance_1",     "name_key": "tile.chance_1",      "tile_type": "chance" },
+    { "id": "prop_4",       "name_key": "tile.prop_4",        "tile_type": "ordinary_property" },
+    { "id": "jail",         "name_key": "tile.jail",          "tile_type": "jail" },
+    { "id": "prop_5",       "name_key": "tile.prop_5",        "tile_type": "ordinary_property" },
+    { "id": "prop_6",       "name_key": "tile.prop_6",        "tile_type": "ordinary_property" },
+    { "id": "prop_7",       "name_key": "tile.prop_7",        "tile_type": "ordinary_property" },
+    { "id": "card_shop_1",  "name_key": "tile.card_shop_1",   "tile_type": "card_shop" },
+    { "id": "prop_8",       "name_key": "tile.prop_8",        "tile_type": "ordinary_property" }
+  ],
+  "properties": [
+    { "tile_id": "prop_1",  "base_price": 60,   "color_group": "brown",    "owner": 0 },
+    { "tile_id": "prop_2",  "base_price": 60,   "color_group": "brown",    "owner": 0 },
+    { "tile_id": "prop_3",  "base_price": 100,  "color_group": "light_blue", "owner": 0 },
+    { "tile_id": "prop_4",  "base_price": 140,  "color_group": "pink",     "owner": 0 },
+    { "tile_id": "prop_5",  "base_price": 180,  "color_group": "orange",   "owner": 0 },
+    { "tile_id": "prop_6",  "base_price": 200,  "color_group": "red",      "owner": 0 },
+    { "tile_id": "prop_7",  "base_price": 220,  "color_group": "red",      "owner": 0 },
+    { "tile_id": "prop_8",  "base_price": 260,  "color_group": "yellow",   "owner": 0 }
+  ],
+  "special_tiles": {
+    "chance_1":   { "kind": "chance" },
+    "jail":       { "kind": "just_visiting" },
+    "card_shop_1": { "kind": "card_shop" }
+  },
+  "chance_tiles": ["chance_1"],
+  "rules": {
+    "allow_custom_topology": true,
+    "allow_stock_market": true,
+    "allow_lottery": true,
+    "allow_card_system": true,
+    "starting_cash": 1500,
+    "pass_start_bonus": 200,
+    "max_upgrade_level": 3
+  }
+}

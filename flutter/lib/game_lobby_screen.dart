@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+import 'game_constants.dart';
+
 import 'network_service.dart' show NetworkService;
 
 import 'config_provider.dart' show ConfigProvider, GameConfig, NetworkConfig;
@@ -218,6 +220,7 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
   // ── Network helpers ───────────────────────────────────────────────────────
 
   /// Attempt to detect the local non-loopback IPv4 address for LAN hosting.
+  /// Also updates the "connect to host" IP input field to match.
   void _detectLocalIp() async {
     try {
       final interfaces = await NetworkInterface.list();
@@ -227,6 +230,9 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
               !addr.isLoopback &&
               addr.address.isNotEmpty) {
             _localIp = addr.address;
+            // Auto-fill the connect IP field with the detected local IP
+            // so that joining players see the correct host address by default.
+            _connectIpCtrl.text = '$_localIp:$_defaultPort';
             return;
           }
         }
@@ -278,8 +284,6 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
       _netSub = _networkService!.messages.listen((message) {
         final type = message['type'] as String?;
         if (type == 'join') {
-          final playerName =
-              message['player_name'] as String? ?? '远程玩家';
           final playerId = message['player_id'] as String? ??
               'remote_${DateTime.now().millisecondsSinceEpoch}';
 
@@ -287,15 +291,19 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
             final emptyIdx =
                 _slots.indexWhere((s) => s.type == PlayerSlotType.empty);
             if (emptyIdx >= 0) {
+              // Auto-assign a unique sequential name based on slot index
+              // to prevent duplicate names (e.g. both host and remote "玩家 1").
+              // Ignore the client-provided player_name to avoid conflicts.
+              final slotName = '玩家 ${emptyIdx + 1}';
               _slots[emptyIdx] = PlayerSlotData(
                 id: playerId,
-                name: playerName,
+                name: slotName,
                 color: _slotColors[emptyIdx],
                 type: PlayerSlotType.human,
                 teamColor: null,
                 isReady: false,
               );
-              _systemMessages.insert(0, '$playerName 已通过局域网加入');
+              _systemMessages.insert(0, '$slotName 已通过局域网加入');
             }
           });
 
@@ -605,9 +613,11 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
       });
 
       // Send join message to announce ourselves
+      // The name sent here is a placeholder; the host will auto-assign
+      // a slot-appropriate name (玩家 2, 玩家 3, etc.) via roster_sync.
       await _networkService!.sendMessage({
         'type': 'join',
-        'player_name': '玩家 1',
+        'player_name': '远程玩家',
         'player_id': 'local_player',
       });
 
@@ -679,12 +689,12 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
 
   void _saveConfig() {
     _configProvider.updateGame(GameConfig(
-      startingCash: int.tryParse(_startCashCtrl.text) ?? 1500,
+      startingCash: int.tryParse(_startCashCtrl.text) ?? CommandConstants.startingCash,
       maxPlayers: _activePlayerCount,
-      passStartBonus: int.tryParse(_passBonusCtrl.text) ?? 200,
-      jailEscapeTurns: int.tryParse(_jailTurnsCtrl.text) ?? 3,
-      hospitalRecoveryTurns: int.tryParse(_hospitalTurnsCtrl.text) ?? 2,
-      maxUpgradeLevel: int.tryParse(_maxUpgradeCtrl.text) ?? 3,
+      passStartBonus: int.tryParse(_passBonusCtrl.text) ?? CommandConstants.passStartBonus,
+      jailEscapeTurns: int.tryParse(_jailTurnsCtrl.text) ?? GameDefaults.baseJailTurns,
+      hospitalRecoveryTurns: int.tryParse(_hospitalTurnsCtrl.text) ?? CommandConstants.hospitalRecoveryTurns,
+      maxUpgradeLevel: int.tryParse(_maxUpgradeCtrl.text) ?? GameDefaults.maxUpgradeLevel,
       extensionUpgradeEnabled: _extensionUpgradeEnabled,
       groupRentEnabled: _groupRentEnabled,
       stockMarketEnabled: _stockMarketEnabled,

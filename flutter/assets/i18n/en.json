@@ -22,6 +22,8 @@
   "mapLShaped.desc": "Non-standard L-shaped custom layout for testing complex paths and corner rendering.",
   "mapMini.name": "Mini Map",
   "mapMini.desc": "Streamlined 20-tile board for quick game sessions.",
+  "map.all_owned.name": "All Player 1 Owned",
+  "map.all_owned.desc": "Test map: all purchasable properties are preset as owned by player 1, for verifying preset ownership.",
 
   "characterSelection.title": "Select Characters",
   "characterSelection.mapLabel": "Map: {mapId}",

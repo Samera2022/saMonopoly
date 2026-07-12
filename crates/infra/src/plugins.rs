@@ -357,7 +357,7 @@ impl PluginEventInjector {
         &self,
         event_type: &str,
         payload: serde_json::Value,
-        state: &sa_monopoly_domain::GameState,
+        state: &mut sa_monopoly_domain::GameState,
     ) {
         let mut bus = self.bus.blocking_lock();
         bus.publish_custom(event_type, &self.plugin_id, payload, state);

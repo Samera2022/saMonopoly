@@ -127,6 +127,24 @@ class BridgeCommand {
         type: 'core:command:config_set',
         params: {'section': section, 'value': value},
       );
+
+  /// Create a new game from map JSON + player configs.
+  /// This is handled specially by the bridge (not through the normal
+  /// command pipeline) and returns a full GameState without requiring
+  /// a prior state.
+  factory BridgeCommand.createGame(
+    Map<String, dynamic> mapJson,
+    List<Map<String, dynamic>> players, {
+    int seed = 0,
+  }) =>
+      BridgeCommand(
+        type: 'core:command:create_game',
+        params: {
+          'map': mapJson,
+          'players': players,
+          'seed': seed,
+        },
+      );
 }
 
 /// Bridge request – matches [crate::bridge::BridgeRequest] on the Rust side.
@@ -264,18 +282,79 @@ typedef SaEngineExecuteNative = Pointer<Utf8> Function(Pointer<Utf8>);
 typedef SaEngineExecuteDart = Pointer<Utf8> Function(Pointer<Utf8>);
 typedef SaEnginePluginCtlNative = Pointer<Utf8> Function(Pointer<Utf8>);
 typedef SaEnginePluginCtlDart = Pointer<Utf8> Function(Pointer<Utf8>);
+typedef SaEngineGetConstantsNative = Pointer<Utf8> Function();
+typedef SaEngineGetConstantsDart = Pointer<Utf8> Function();
 typedef SaEngineFreeStringNative = Void Function(Pointer<Utf8>);
 typedef SaEngineFreeStringDart = void Function(Pointer<Utf8>);
 
+// Map loading FFI bindings
+typedef SaEngineLoadMapNative = Pointer<Utf8> Function(Pointer<Utf8>);
+typedef SaEngineLoadMapDart = Pointer<Utf8> Function(Pointer<Utf8>);
+typedef SaEngineScanMapsNative = Pointer<Utf8> Function(Pointer<Utf8>);
+typedef SaEngineScanMapsDart = Pointer<Utf8> Function(Pointer<Utf8>);
+typedef SaEngineGetThumbnailNative = Pointer<Utf8> Function(Pointer<Utf8>);
+typedef SaEngineGetThumbnailDart = Pointer<Utf8> Function(Pointer<Utf8>);
+
+// Session sync FFI bindings
+typedef SaEngineSyncDiffNative = Pointer<Utf8> Function(Pointer<Utf8>);
+typedef SaEngineSyncDiffDart = Pointer<Utf8> Function(Pointer<Utf8>);
+typedef SaEngineSyncApplyNative = Pointer<Utf8> Function(Pointer<Utf8>);
+typedef SaEngineSyncApplyDart = Pointer<Utf8> Function(Pointer<Utf8>);
+typedef SaEngineSyncConflictNative = Pointer<Utf8> Function(Pointer<Utf8>);
+typedef SaEngineSyncConflictDart = Pointer<Utf8> Function(Pointer<Utf8>);
+
+// Config FFI bindings
+typedef SaEngineConfigLoadNative = Pointer<Utf8> Function();
+typedef SaEngineConfigLoadDart = Pointer<Utf8> Function();
+typedef SaEngineConfigSaveNative = Pointer<Utf8> Function(Pointer<Utf8>);
+typedef SaEngineConfigSaveDart = Pointer<Utf8> Function(Pointer<Utf8>);
+
+// Save/Load FFI bindings
+typedef SaEngineSaveGameNative = Pointer<Utf8> Function(Pointer<Utf8>);
+typedef SaEngineSaveGameDart = Pointer<Utf8> Function(Pointer<Utf8>);
+typedef SaEngineLoadGameNative = Pointer<Utf8> Function(Pointer<Utf8>);
+typedef SaEngineLoadGameDart = Pointer<Utf8> Function(Pointer<Utf8>);
+typedef SaEngineListSavesNative = Pointer<Utf8> Function();
+typedef SaEngineListSavesDart = Pointer<Utf8> Function();
+typedef SaEngineDeleteSaveNative = Pointer<Utf8> Function(Pointer<Utf8>);
+typedef SaEngineDeleteSaveDart = Pointer<Utf8> Function(Pointer<Utf8>);
+
 /// Loads the Rust shared library and binds the native functions.
 class RustEngineBinding {
+  static RustEngineBinding? _instance;
+
+  /// Get or create the global RustEngineBinding singleton.
+  factory RustEngineBinding() {
+    _instance ??= RustEngineBinding._();
+    return _instance!;
+  }
+
+  RustEngineBinding._() {
+    _init();
+  }
+
   late final DynamicLibrary _lib;
   late final SaEngineExecuteDart _execute;
   SaEnginePluginCtlDart? _pluginCtl;
+  SaEngineGetConstantsDart? _getConstants;
   late final SaEngineFreeStringDart _freeString;
+  SaEngineLoadMapDart? _loadMap;
+  SaEngineScanMapsDart? _scanMaps;
+  SaEngineGetThumbnailDart? _getThumbnail;
+  SaEngineConfigLoadDart? _configLoad;
+  SaEngineConfigSaveDart? _configSave;
+  SaEngineSaveGameDart? _saveGame;
+  SaEngineLoadGameDart? _loadGame;
+  SaEngineListSavesDart? _listSaves;
+  SaEngineDeleteSaveDart? _deleteSave;
+  SaEngineSyncDiffDart? _syncDiff;
+  SaEngineSyncApplyDart? _syncApply;
+  SaEngineSyncConflictDart? _syncConflict;
   bool _available = false;
+  /// Raw JSON string from sa_engine_get_constants, or null if unavailable.
+  String? _constantsJson;
 
-  RustEngineBinding() {
+  void _init() {
     try {
       // Try common library paths
       final libraryPaths = [
@@ -321,6 +400,78 @@ class RustEngineBinding {
       _freeString = _lib
           .lookupFunction<SaEngineFreeStringNative, SaEngineFreeStringDart>(
               'sa_engine_free_string');
+      // Map loading FFI functions
+      try {
+        _loadMap = _lib
+            .lookupFunction<SaEngineLoadMapNative, SaEngineLoadMapDart>(
+                'sa_engine_load_map');
+        _scanMaps = _lib
+            .lookupFunction<SaEngineScanMapsNative, SaEngineScanMapsDart>(
+                'sa_engine_scan_maps');
+        _getThumbnail = _lib
+            .lookupFunction<SaEngineGetThumbnailNative, SaEngineGetThumbnailDart>(
+                'sa_engine_get_thumbnail');
+      } catch (_) {
+        debugPrint('sa_engine_map functions not available');
+      }
+      // Config FFI functions
+      try {
+        _configLoad = _lib.lookupFunction<SaEngineConfigLoadNative,
+            SaEngineConfigLoadDart>('sa_engine_config_load');
+        _configSave = _lib.lookupFunction<SaEngineConfigSaveNative,
+            SaEngineConfigSaveDart>('sa_engine_config_save');
+        debugPrint('Config FFI functions loaded');
+      } catch (_) {
+        debugPrint('sa_engine_config_* functions not available');
+      }
+      // Save/Load FFI functions
+      try {
+        _saveGame = _lib.lookupFunction<SaEngineSaveGameNative, SaEngineSaveGameDart>(
+            'sa_engine_save_game');
+        _loadGame = _lib.lookupFunction<SaEngineLoadGameNative, SaEngineLoadGameDart>(
+            'sa_engine_load_game');
+        _listSaves = _lib.lookupFunction<SaEngineListSavesNative, SaEngineListSavesDart>(
+            'sa_engine_list_saves');
+        _deleteSave = _lib.lookupFunction<SaEngineDeleteSaveNative, SaEngineDeleteSaveDart>(
+            'sa_engine_delete_save');
+        debugPrint('Save/Load FFI functions loaded');
+      } catch (_) {
+        debugPrint('sa_engine_save/load functions not available');
+      }
+      // Session sync FFI functions
+      try {
+        _syncDiff = _lib.lookupFunction<SaEngineSyncDiffNative, SaEngineSyncDiffDart>(
+            'sa_engine_sync_diff');
+        debugPrint('Session sync FFI function loaded');
+      } catch (_) {
+        debugPrint('sa_engine_sync_diff not available');
+      }
+      try {
+        _syncApply = _lib.lookupFunction<SaEngineSyncApplyNative, SaEngineSyncApplyDart>(
+            'sa_engine_sync_apply');
+        debugPrint('sa_engine_sync_apply loaded');
+      } catch (_) {
+        debugPrint('sa_engine_sync_apply not available');
+      }
+      try {
+        _syncConflict = _lib.lookupFunction<SaEngineSyncConflictNative, SaEngineSyncConflictDart>(
+            'sa_engine_sync_conflict');
+        debugPrint('sa_engine_sync_conflict loaded');
+      } catch (_) {
+        debugPrint('sa_engine_sync_conflict not available');
+      }
+      // Load game constants from Rust engine
+      try {
+        _getConstants = _lib
+            .lookupFunction<SaEngineGetConstantsNative, SaEngineGetConstantsDart>(
+                'sa_engine_get_constants');
+        final constantsPtr = _getConstants!();
+        _constantsJson = constantsPtr.toDartString();
+        _freeString(constantsPtr);
+        debugPrint('Game constants loaded from Rust engine');
+      } catch (_) {
+        debugPrint('sa_engine_get_constants not available');
+      }
       _available = true;
       debugPrint('Rust engine FFI bridge initialized successfully');
     } catch (e) {
@@ -330,6 +481,9 @@ class RustEngineBinding {
   }
 
   bool get isAvailable => _available;
+
+  /// Raw JSON string from sa_engine_get_constants, or null if unavailable.
+  String? get constantsJson => _constantsJson;
 
   /// Execute a command JSON string against the Rust engine.
   /// Returns the response JSON string.
@@ -363,6 +517,155 @@ class RustEngineBinding {
     } catch (_) {}
     return null;
   }
+
+  /// Load a map from a file path (.smap or .json). Returns MapDefinition JSON.
+  String? loadMap(String path) {
+    if (!_available || _loadMap == null) return null;
+    final inputPtr = path.toNativeUtf8();
+    final resultPtr = _loadMap!(inputPtr);
+    calloc.free(inputPtr);
+    final result = resultPtr.toDartString();
+    _freeString(resultPtr);
+    return result;
+  }
+
+  /// Scan a directory for map files. Returns JSON array of map metadata.
+  String? scanMaps(String dirPath) {
+    if (!_available || _scanMaps == null) return null;
+    final inputPtr = dirPath.toNativeUtf8();
+    final resultPtr = _scanMaps!(inputPtr);
+    calloc.free(inputPtr);
+    final result = resultPtr.toDartString();
+    _freeString(resultPtr);
+    return result;
+  }
+
+  /// Get thumbnail from a .smap file. Returns JSON with base64 PNG or error.
+  String? getThumbnail(String path) {
+    if (!_available || _getThumbnail == null) return null;
+    final inputPtr = path.toNativeUtf8();
+    final resultPtr = _getThumbnail!(inputPtr);
+    calloc.free(inputPtr);
+    final result = resultPtr.toDartString();
+    _freeString(resultPtr);
+    return result;
+  }
+
+  /// Load configuration from the Rust engine's FileConfigStore.
+  /// Returns JSON of the entire ConfigDocument, or error JSON.
+  String? configLoad() {
+    if (!_available || _configLoad == null) return null;
+    final resultPtr = _configLoad!();
+    final result = resultPtr.toDartString();
+    _freeString(resultPtr);
+    return result;
+  }
+
+  /// Save configuration to the Rust engine's FileConfigStore.
+  /// Input: JSON string of the entire ConfigDocument.
+  /// Returns `{"ok": true}` or `{"ok": false, "error": "..."}`.
+  String? configSave(String configJson) {
+    if (!_available || _configSave == null) return null;
+    final inputPtr = configJson.toNativeUtf8();
+    final resultPtr = _configSave!(inputPtr);
+    calloc.free(inputPtr);
+    final result = resultPtr.toDartString();
+    _freeString(resultPtr);
+    return result;
+  }
+
+  // ── Save/Load FFI methods ──────────────────────────────────────────────────
+
+  /// Save a game state to disk via the Rust engine.
+  /// Input: JSON string `{"file_name": "...", "state": {...}}`.
+  /// Returns `{"ok": true}` or `{"ok": false, "error": "..."}`.
+  String? saveGame(String payloadJson) {
+    if (!_available || _saveGame == null) return null;
+    final inputPtr = payloadJson.toNativeUtf8();
+    final resultPtr = _saveGame!(inputPtr);
+    calloc.free(inputPtr);
+    final result = resultPtr.toDartString();
+    _freeString(resultPtr);
+    return result;
+  }
+
+  /// Load a game state from disk via the Rust engine.
+  /// Input: save file name (e.g. `"mygame.sav"`).
+  /// Returns full SaveGame JSON (`{"version": "...", "state": {...}}`)
+  /// or `{"ok": false, "error": "..."}`.
+  String? loadGame(String fileName) {
+    if (!_available || _loadGame == null) return null;
+    final inputPtr = fileName.toNativeUtf8();
+    final resultPtr = _loadGame!(inputPtr);
+    calloc.free(inputPtr);
+    final result = resultPtr.toDartString();
+    _freeString(resultPtr);
+    return result;
+  }
+
+  /// List all save files via the Rust engine.
+  /// Returns JSON array of `[{"file_name": "...", "path": "..."}]`.
+  String? listSaves() {
+    if (!_available || _listSaves == null) return null;
+    final resultPtr = _listSaves!();
+    final result = resultPtr.toDartString();
+    _freeString(resultPtr);
+    return result;
+  }
+
+  /// Delete a save file via the Rust engine.
+  /// Input: save file name (e.g. `"mygame.sav"`).
+  /// Returns `{"ok": true}` or `{"ok": false, "error": "..."}`.
+  String? deleteSave(String fileName) {
+    if (!_available || _deleteSave == null) return null;
+    final inputPtr = fileName.toNativeUtf8();
+    final resultPtr = _deleteSave!(inputPtr);
+    calloc.free(inputPtr);
+    final result = resultPtr.toDartString();
+    _freeString(resultPtr);
+    return result;
+  }
+
+  // ── Session sync FFI methods ──────────────────────────────────────────────
+
+  /// Compute a state diff for network sync via the Rust engine.
+  /// Input: JSON string `{"before": GameState, "after": GameState}`.
+  /// Returns: JSON diff string, or null if unavailable.
+  String? syncDiff(String payloadJson) {
+    if (!_available || _syncDiff == null) return null;
+    final inputPtr = payloadJson.toNativeUtf8();
+    final resultPtr = _syncDiff!(inputPtr);
+    calloc.free(inputPtr);
+    final result = resultPtr.toDartString();
+    _freeString(resultPtr);
+    return result;
+  }
+
+  /// Apply a diff to a GameState via the Rust engine.
+  /// Input: JSON string `{"state": GameState, "diff": {...}}`.
+  /// Returns: JSON of the patched GameState, or null if unavailable.
+  String? syncApply(String payloadJson) {
+    if (!_available || _syncApply == null) return null;
+    final inputPtr = payloadJson.toNativeUtf8();
+    final resultPtr = _syncApply!(inputPtr);
+    calloc.free(inputPtr);
+    final result = resultPtr.toDartString();
+    _freeString(resultPtr);
+    return result;
+  }
+
+  /// Check for revision conflict via the Rust engine.
+  /// Input: JSON string `{"local_rev": u64, "remote_rev": u64}`.
+  /// Returns: `{"conflict": true/false}`, or null if unavailable.
+  String? syncConflict(String payloadJson) {
+    if (!_available || _syncConflict == null) return null;
+    final inputPtr = payloadJson.toNativeUtf8();
+    final resultPtr = _syncConflict!(inputPtr);
+    calloc.free(inputPtr);
+    final result = resultPtr.toDartString();
+    _freeString(resultPtr);
+    return result;
+  }
 }
 
 // ============================================================================
@@ -377,6 +680,17 @@ class BridgeClient {
 
   /// Get the underlying Rust engine binding for direct FFI access.
   RustEngineBinding get engine => _engine;
+
+  /// Game constants loaded from the Rust engine, or null if unavailable.
+  Map<String, dynamic>? get gameConstants {
+    final json = _engine.constantsJson;
+    if (json == null) return null;
+    try {
+      return jsonDecode(json) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
 
   /// Serialise a [BridgeRequest] into its JSON wire format.
   String buildRequest(BridgeRequest request) {
@@ -437,6 +751,65 @@ class BridgeClient {
     }
     return BridgeResponse.fromJson(decoded);
   }
+
+  // ── Map loading FFI proxy methods ──────────────────────────────────────────
+
+  /// Load a map from a file path (.smap or .json). Returns MapDefinition JSON.
+  String? loadMap(String path) => _engine.loadMap(path);
+
+  /// Scan a directory for map files. Returns JSON array of map metadata.
+  String? scanMaps(String dirPath) => _engine.scanMaps(dirPath);
+
+  /// Get thumbnail from a .smap file. Returns JSON with base64 PNG or error.
+  String? getThumbnail(String path) => _engine.getThumbnail(path);
+
+  // ── Config FFI proxy methods ───────────────────────────────────────────────
+
+  /// Load configuration from the Rust engine's FileConfigStore.
+  /// Returns JSON of the entire ConfigDocument, or error JSON.
+  String? configLoad() => _engine.configLoad();
+
+  /// Save configuration to the Rust engine's FileConfigStore.
+  /// Input: JSON string of the entire ConfigDocument.
+  /// Returns `{"ok": true}` or `{"ok": false, "error": "..."}`.
+  String? configSave(String configJson) => _engine.configSave(configJson);
+
+  // ── Save/Load FFI proxy methods ────────────────────────────────────────────
+
+  /// Save a game state to disk via the Rust engine.
+  /// Input: JSON string `{"file_name": "...", "state": {...}}`.
+  /// Returns `{"ok": true}` or `{"ok": false, "error": "..."}`.
+  String? saveGame(String payloadJson) => _engine.saveGame(payloadJson);
+
+  /// Load a game state from disk via the Rust engine.
+  /// Input: save file name (e.g. `"mygame.sav"`).
+  /// Returns full SaveGame JSON or error.
+  String? loadGame(String fileName) => _engine.loadGame(fileName);
+
+  /// List all save files via the Rust engine.
+  /// Returns JSON array of save metadata.
+  String? listSaves() => _engine.listSaves();
+
+  /// Delete a save file via the Rust engine.
+  /// Returns `{"ok": true}` or `{"ok": false, "error": "..."}`.
+  String? deleteSave(String fileName) => _engine.deleteSave(fileName);
+
+  // ── Session sync FFI proxy methods ─────────────────────────────────────────
+
+  /// Compute a state diff for network sync via the Rust engine.
+  /// Input: JSON string `{"before": GameState, "after": GameState}`.
+  /// Returns: JSON diff string, or null if unavailable.
+  String? syncDiff(String payloadJson) => _engine.syncDiff(payloadJson);
+
+  /// Apply a diff to a GameState via the Rust engine.
+  /// Input: JSON string `{"state": GameState, "diff": {...}}`.
+  /// Returns: JSON of the patched GameState, or null if unavailable.
+  String? syncApply(String payloadJson) => _engine.syncApply(payloadJson);
+
+  /// Check for revision conflict via the Rust engine.
+  /// Input: JSON string `{"local_rev": u64, "remote_rev": u64}`.
+  /// Returns: `{"conflict": true/false}`, or null if unavailable.
+  String? syncConflict(String payloadJson) => _engine.syncConflict(payloadJson);
 
   /// Parse a list of players from a GameState JSON map.
   static List<PlayerViewModel> parsePlayers(Map<String, dynamic> state) {

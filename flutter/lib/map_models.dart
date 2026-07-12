@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'game_constants.dart';
+
 // ============================================================================
 // Dart models mirroring Rust map data structures from:
 //   crates/infra/src/map.rs     → MapDefinition, MapTile, MapRules, MapPluginRef
@@ -27,34 +29,34 @@ enum TileKind {
 
   static TileKind fromString(String s) {
     switch (s) {
-      case 'Start':
+      case TileKindNames.start:
       case 'start':
         return TileKind.start;
-      case 'OrdinaryProperty':
+      case TileKindNames.ordinaryProperty:
       case 'ordinary_property':
         return TileKind.ordinaryProperty;
-      case 'SpecialProperty':
+      case TileKindNames.specialProperty:
       case 'special_property':
         return TileKind.specialProperty;
-      case 'ExtensionProperty':
+      case TileKindNames.extensionProperty:
       case 'extension_property':
         return TileKind.extensionProperty;
-      case 'Chance':
+      case TileKindNames.chance:
       case 'chance':
         return TileKind.chance;
-      case 'CardShop':
+      case TileKindNames.cardShop:
       case 'card_shop':
         return TileKind.cardShop;
-      case 'Lottery':
+      case TileKindNames.lottery:
       case 'lottery':
         return TileKind.lottery;
-      case 'Bank':
+      case TileKindNames.bank:
       case 'bank':
         return TileKind.bank;
-      case 'Jail':
+      case TileKindNames.jail:
       case 'jail':
         return TileKind.jail;
-      case 'Hospital':
+      case TileKindNames.hospital:
       case 'hospital':
         return TileKind.hospital;
       default:
@@ -65,25 +67,25 @@ enum TileKind {
   String get displayName {
     switch (this) {
       case TileKind.start:
-        return 'Start';
+        return TileKindNames.start;
       case TileKind.ordinaryProperty:
-        return 'OrdinaryProperty';
+        return TileKindNames.ordinaryProperty;
       case TileKind.specialProperty:
-        return 'SpecialProperty';
+        return TileKindNames.specialProperty;
       case TileKind.extensionProperty:
-        return 'ExtensionProperty';
+        return TileKindNames.extensionProperty;
       case TileKind.chance:
-        return 'Chance';
+        return TileKindNames.chance;
       case TileKind.cardShop:
-        return 'CardShop';
+        return TileKindNames.cardShop;
       case TileKind.lottery:
-        return 'Lottery';
+        return TileKindNames.lottery;
       case TileKind.bank:
-        return 'Bank';
+        return TileKindNames.bank;
       case TileKind.jail:
-        return 'Jail';
+        return TileKindNames.jail;
       case TileKind.hospital:
-        return 'Hospital';
+        return TileKindNames.hospital;
       case TileKind.unknown:
         return 'Unknown';
     }

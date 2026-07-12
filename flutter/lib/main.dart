@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show rootBundle;
 
 import 'board_view.dart';
 import 'home_screen.dart';
@@ -15,10 +16,75 @@ import 'card_shop_dialog.dart';
 import 'config_provider.dart';
 import 'content_pack.dart';
 import 'content_pack_loader.dart';
+import 'game_constants.dart';
 import 'isometric_board.dart';
 import 'lottery_dialog.dart';
 import 'plugin_state.dart';
 import 'event_dispatcher.dart';
+
+// ============================================================================
+// Event log entry types
+// ============================================================================
+
+/// A single event log entry with visual metadata (icon, color).
+class EventLogEntry {
+  final String message;
+  final String category;
+
+  const EventLogEntry(this.message, {this.category = 'system'});
+
+  static const _iconMap = <String, IconData>{
+    'roll': Icons.casino,
+    'move': Icons.directions_walk,
+    'money': Icons.attach_money,
+    'property': Icons.home,
+    'card': Icons.style,
+    'jail': Icons.lock,
+    'hospital': Icons.local_hospital,
+    'turn': Icons.repeat,
+    'trade': Icons.swap_horiz,
+    'auction': Icons.gavel,
+    'win': Icons.emoji_events,
+    'bankrupt': Icons.money_off,
+    'system': Icons.info_outline,
+  };
+
+  static const _colorMap = <String, Color>{
+    'roll': Color(0xFFFF9800),
+    'move': Color(0xFF2196F3),
+    'money': Color(0xFF4CAF50),
+    'property': Color(0xFF9C27B0),
+    'card': Color(0xFFE91E63),
+    'jail': Color(0xFFF44336),
+    'hospital': Color(0xFFFF5722),
+    'turn': Color(0xFF9E9E9E),
+    'trade': Color(0xFF00BCD4),
+    'auction': Color(0xFFFF6F00),
+    'win': Color(0xFFFFD700),
+    'bankrupt': Color(0xFF795548),
+    'system': Color(0xFFB0BEC5),
+  };
+
+  IconData get icon => _iconMap[category] ?? Icons.info_outline;
+  Color get color => _colorMap[category] ?? const Color(0xFFB0BEC5);
+
+  /// Infer category from common event message patterns.
+  static String inferCategory(String msg) {
+    if (msg.startsWith('Rolled')) return 'roll';
+    if (msg.startsWith('moved') || msg.startsWith('player_')) return 'move';
+    if (msg.contains('tax') || msg.contains('bonus') || msg.contains('paid') || msg.contains('bail') || msg.contains('rent')) return 'money';
+    if (msg.startsWith('Bought') || msg.startsWith('Upgraded') || msg.startsWith('Mortgaged') || msg.startsWith('Redeemed')) return 'property';
+    if (msg.contains('card') || msg.contains('Card') || msg.contains('Drew')) return 'card';
+    if (msg.contains('jail') || msg.contains('Jail')) return 'jail';
+    if (msg.contains('hospital') || msg.contains('Hospital')) return 'hospital';
+    if (msg.startsWith('Turn')) return 'turn';
+    if (msg.contains('trade') || msg.contains('Trade')) return 'trade';
+    if (msg.contains('auction') || msg.contains('Auction')) return 'auction';
+    if (msg.contains('win') || msg.contains('Win') || msg.contains('won')) return 'win';
+    if (msg.contains('bankrupt') || msg.contains('Bankrupt')) return 'bankrupt';
+    return 'system';
+  }
+}
 
 // ============================================================================
 // Game state management (simple InheritedWidget)
@@ -29,7 +95,7 @@ class GameStateData {
   final List<PlayerTokenViewModel> players;
   final Map<String, dynamic> rawState;
   final String lastEvent;
-  final List<String> eventLog;
+  final List<EventLogEntry> eventLog;
   final Map<String, int> diceResult;
   /// Plugin activity messages (shown in purple in the event log)
   final List<String> pluginMessages;
@@ -47,7 +113,7 @@ class GameStateData {
     List<PlayerTokenViewModel>? players,
     Map<String, dynamic>? rawState,
     String? lastEvent,
-    List<String>? eventLog,
+    List<EventLogEntry>? eventLog,
     Map<String, int>? diceResult,
     List<String>? pluginMessages,
   }) {
@@ -204,6 +270,10 @@ class _GameScreenState extends State<GameScreen> {
   /// Using state-based overlay instead of showDialog for instant response.
   String? _detailTileId;
 
+  /// Deferred roll log message for client-side animation sync.
+  /// Stored during `roll_end` and shown after `move_end` completes.
+  List<String>? _pendingRollLogs;
+
   /// Whether the current active player is controlled by this client.
   ///
   /// - **Offline**: always `true` (no restrictions).
@@ -276,78 +346,6 @@ class _GameScreenState extends State<GameScreen> {
     (3, 0), // tile 15 — corner down→right
   ];
 
-  final List<Map<String, String>> _complexTiles = const [
-    {'id': 'start',     'name': 'Start',        'kind': 'Start'},
-    {'id': 'prop_1',    'name': 'Med Ave',      'kind': 'OrdinaryProperty'},
-    {'id': 'chance_1',  'name': 'Chance',       'kind': 'Chance'},
-    {'id': 'prop_2',    'name': 'Baltic Ave',   'kind': 'OrdinaryProperty'},
-    {'id': 'tax_1',     'name': 'Income Tax',   'kind': 'Bank'},
-    {'id': 'prop_3',    'name': 'Oriental Ave', 'kind': 'OrdinaryProperty'},
-    {'id': 'rr_1',      'name': 'Reading RR',   'kind': 'OrdinaryProperty'},
-    {'id': 'corner_1',  'name': '↱ Up Turn',    'kind': 'Jail'},
-    {'id': 'chance_2',  'name': 'Community',    'kind': 'Chance'},
-    {'id': 'corner_2',  'name': '↰ Left Turn',  'kind': 'CardShop'},
-    {'id': 'prop_4',    'name': 'Vermont Ave',  'kind': 'OrdinaryProperty'},
-    {'id': 'prop_5',    'name': 'Conn Ave',     'kind': 'OrdinaryProperty'},
-    {'id': 'corner_3',  'name': '↖ Top',        'kind': 'Start'},
-    {'id': 'util_1',    'name': 'Electric Co',  'kind': 'ExtensionProperty'},
-    {'id': 'prop_6',    'name': 'St Charles',   'kind': 'OrdinaryProperty'},
-    {'id': 'corner_4',  'name': '↙ Down Turn',  'kind': 'Bank'},
-  ];
-
-  // Default tile set for the built-in board
-  /// The 40-tile classic Monopoly board with reserved expansion slots.
-  ///
-  /// Tiles with kind "Reserved" are pass-through tiles (no effect) that can
-  /// be dynamically replaced with `Lottery` or `StockMarket` tiles when those
-  /// sub-systems are enabled via game config.
-  final List<Map<String, String>> _defaultTiles = const [
-    // ── Bottom row (Start → Jail) ─────────────────────────────────────
-    {'id': 'start',     'name': 'Start',             'kind': 'Start'},
-    {'id': 'prop_1',    'name': 'Mediterranean Ave',  'kind': 'OrdinaryProperty'},
-    {'id': 'chance_1',  'name': 'Chance',             'kind': 'Chance'},
-    {'id': 'prop_2',    'name': 'Baltic Ave',         'kind': 'OrdinaryProperty'},
-    {'id': 'tax_1',     'name': 'Income Tax',         'kind': 'Bank'},
-    {'id': 'rr_1',      'name': 'Reading RR',         'kind': 'OrdinaryProperty'},
-    {'id': 'prop_3',    'name': 'Oriental Ave',       'kind': 'OrdinaryProperty'},
-    {'id': 'lottery_1', 'name': 'Lottery',            'kind': 'Lottery'},
-    {'id': 'prop_4',    'name': 'Vermont Ave',        'kind': 'OrdinaryProperty'},
-    {'id': 'prop_5',    'name': 'Connecticut Ave',    'kind': 'OrdinaryProperty'},
-    // ── Right column (Jail → Free Parking) ────────────────────────────
-    {'id': 'jail',      'name': 'Jail',               'kind': 'Jail'},
-    {'id': 'prop_6',    'name': 'St. Charles Pl',     'kind': 'OrdinaryProperty'},
-    {'id': 'util_1',    'name': 'Electric Co',        'kind': 'ExtensionProperty'},
-    {'id': 'prop_7',    'name': 'States Ave',         'kind': 'OrdinaryProperty'},
-    {'id': 'prop_8',    'name': 'Virginia Ave',       'kind': 'OrdinaryProperty'},
-    {'id': 'rr_2',      'name': 'Penn RR',            'kind': 'OrdinaryProperty'},
-    {'id': 'prop_9',    'name': 'St. James Pl',       'kind': 'OrdinaryProperty'},
-    {'id': 'chance_3',  'name': 'Chance',             'kind': 'Chance'},
-    {'id': 'prop_10',   'name': 'Tennessee Ave',      'kind': 'OrdinaryProperty'},
-    {'id': 'prop_11',   'name': 'New York Ave',       'kind': 'OrdinaryProperty'},
-    // ── Top row (Free Parking → Go To Jail) ──────────────────────────
-    {'id': 'park',      'name': 'Free Parking',       'kind': 'Bank'},
-    {'id': 'prop_12',   'name': 'Kentucky Ave',       'kind': 'OrdinaryProperty'},
-    {'id': 'chance_4',  'name': 'Chance',             'kind': 'Chance'},
-    {'id': 'prop_13',   'name': 'Indiana Ave',        'kind': 'OrdinaryProperty'},
-    {'id': 'prop_14',   'name': 'Illinois Ave',       'kind': 'OrdinaryProperty'},
-    {'id': 'rr_3',      'name': 'B&O RR',             'kind': 'OrdinaryProperty'},
-    {'id': 'prop_15',   'name': 'Atlantic Ave',       'kind': 'OrdinaryProperty'},
-    {'id': 'card_shop_1','name': 'Card Shop',         'kind': 'CardShop'},
-    {'id': 'util_2',    'name': 'Water Works',        'kind': 'ExtensionProperty'},
-    {'id': 'prop_17',   'name': 'Marvin Gardens',     'kind': 'OrdinaryProperty'},
-    // ── Left column (Go To Jail → Start) ─────────────────────────────
-    {'id': 'go_to_jail','name': 'Go To Jail',         'kind': 'Jail'},
-    {'id': 'prop_18',   'name': 'Pacific Ave',        'kind': 'OrdinaryProperty'},
-    {'id': 'prop_19',   'name': 'N. Carolina Ave',    'kind': 'OrdinaryProperty'},
-    {'id': 'chance_5',  'name': 'Chance',             'kind': 'Chance'},
-    {'id': 'prop_20',   'name': 'Pennsylvania Ave',   'kind': 'OrdinaryProperty'},
-    {'id': 'rr_4',      'name': 'Short Line',         'kind': 'OrdinaryProperty'},
-    {'id': 'reserve_1', 'name': 'Expansion Slot',     'kind': 'Bank'},   // → StockMarket
-    {'id': 'prop_21',   'name': 'Park Place',         'kind': 'OrdinaryProperty'},
-    {'id': 'tax_2',     'name': 'Luxury Tax',         'kind': 'Bank'},
-    {'id': 'prop_22',   'name': 'Boardwalk',          'kind': 'OrdinaryProperty'},
-  ];
-
   final SaveManager _saveManager = SaveManager();
 
   @override
@@ -355,11 +353,14 @@ class _GameScreenState extends State<GameScreen> {
     super.initState();
     // Attach Rust engine to PluginState for real enable/disable
     PluginState().attachEngine(_bridgeClient.engine);
+    // Load game constants from Rust engine (if available)
+    GameConstants.load(_bridgeClient);
     _pack = sampleClassicPack();
 
-    // Map selection: 'classic' uses the 40-tile board, anything else uses
+    // Map selection: 'classic' uses the 40-tile board, 'complex' uses
     // the complex L-shaped test board for development/testing.
-    _useComplexBoard = widget.mapId != 'classic';
+    // All other maps (e.g. 'all_owned') use the classic 40-tile layout.
+    _useComplexBoard = widget.mapId == 'complex';
 
     _networkService = widget.networkService;
 
@@ -372,46 +373,27 @@ class _GameScreenState extends State<GameScreen> {
       // Subscribe to network messages
       _netGameSub = net.messages.listen(_onNetworkMessage);
 
+      // Register event subscribers for UI-trigger events (MUST be before any
+      // roll command, regardless of host/client mode).
+      _registerEventSubscriptions();
+
       if (net.isHost) {
         // ── Host: build state locally, broadcast game_start ────────────
         if (widget.initialState != null) {
           _currentState = Map<String, dynamic>.from(widget.initialState!);
         } else {
-          final playerCount = widget.initialPlayerCount ?? 2;
-          _currentState = _buildInitialState(playerCount, teamIds: widget.teamIds);
-
-          if (widget.playerNames != null || widget.aiFlags != null) {
-            final players = _currentState['players'] as List<Map<String, dynamic>>;
-            for (var i = 0; i < players.length && i < playerCount; i++) {
-              if (widget.playerNames != null && i < widget.playerNames!.length) {
-                players[i]['name'] = widget.playerNames![i];
-              }
-              if (widget.aiFlags != null && i < widget.aiFlags!.length) {
-                players[i]['is_ai'] = widget.aiFlags![i];
-              }
-            }
-            _currentState['players'] = players;
-          }
+          _currentState = {};
+          // Async init via Rust
+          Future.microtask(() => _initGameFromRust());
         }
-        _gameState = _buildGameState(_currentState, lastEvent: 'Game started (host)');
-        _landedTileIdThisTurn = null;
-        _addLog('Game started (host mode)');
-
-        // Broadcast initial state to all connected clients
-        net.sendMessage({
-          'type': 'game_start',
-          'state': _currentState,
-        });
       } else {
         // ── Client: wait for game_start from host ──────────────────────
         _landedTileIdThisTurn = null;
         if (widget.initialState != null) {
-          // State was already provided via game_start message from lobby
           _currentState = Map<String, dynamic>.from(widget.initialState!);
           _gameState = _buildGameState(_currentState, lastEvent: 'Game started (client)');
           _addLog('Game started (client mode)');
         } else {
-          // State will arrive via game_start message on the network stream
           _currentState = {};
           _gameState = const GameStateData();
           _addLog('Waiting for host to start game...');
@@ -421,7 +403,7 @@ class _GameScreenState extends State<GameScreen> {
     }
 
     // ────────────────────────────────────────────────────────────────────────
-    // Offline mode (original logic)
+    // Offline mode
     // ────────────────────────────────────────────────────────────────────────
     if (widget.initialState != null) {
       // ── Load from save ──────────────────────────────────────────────
@@ -431,30 +413,17 @@ class _GameScreenState extends State<GameScreen> {
       final mapLabel = _useComplexBoard ? 'Complex L‑board' : 'Classic';
       _addLog('Game restored from save ($mapLabel) with ${_gameState.numPlayers} players');
     } else {
-      // ── Fresh game ──────────────────────────────────────────────────
-      final playerCount = widget.initialPlayerCount ?? 2;
-      _currentState = _buildInitialState(playerCount, teamIds: widget.teamIds);
-      _gameState = _buildGameState(_currentState);
-      _landedTileIdThisTurn = null;
-
-      // Apply custom player names and AI flags if provided
-      if (widget.playerNames != null || widget.aiFlags != null) {
-        final players = _currentState['players'] as List<Map<String, dynamic>>;
-        for (var i = 0; i < players.length && i < playerCount; i++) {
-          if (widget.playerNames != null && i < widget.playerNames!.length) {
-            players[i]['name'] = widget.playerNames![i];
-          }
-          if (widget.aiFlags != null && i < widget.aiFlags!.length) {
-            players[i]['is_ai'] = widget.aiFlags![i];
-          }
-        }
-        _currentState['players'] = players;
-        _gameState = _buildGameState(_currentState, lastEvent: 'Game initialized');
-      }
+      // ── Fresh game via Rust engine ──────────────────────────────────
+      _currentState = {};
+      _gameState = const GameStateData();
+      Future.microtask(() => _initGameFromRust());
 
       final mapLabel = _useComplexBoard ? 'Complex L‑board' : 'Classic';
       _addLog('Game started ($mapLabel) with ${_gameState.numPlayers} players');
     }
+
+    // Register event subscribers for UI-trigger events
+    _registerEventSubscriptions();
   }
 
   /// Handle incoming network messages.
@@ -473,17 +442,25 @@ class _GameScreenState extends State<GameScreen> {
         break;
 
       case 'roll_end':
+        // Skip if we are the roller (host processes via _onRoll directly)
+        if (_isRollInProgress) break;
         final dice1 = (message['dice1'] as num?)?.toInt() ?? 0;
         final dice2 = (message['dice2'] as num?)?.toInt() ?? 0;
         final state = message['state'] as Map<String, dynamic>?;
         final event = message['event'] as Map<String, dynamic>?;
-        final rollLog = message['action_log'] as String?;
+        final rollLogs = (message['action_logs'] as List<dynamic>?)?.cast<String>();
         if (state != null) {
-          if (rollLog != null && rollLog.isNotEmpty) _addLog(rollLog);
           if (isHost) {
+            // Host: add roll logs from client immediately (client will also
+            // get them via relay on move_end, but host needs them now).
+            if (rollLogs != null) {
+              for (final log in rollLogs) { _addLog(log); }
+            }
             _handleRemoteRollEnd(dice1, dice2, state, event);
             _networkService?.sendMessage(message);
           } else {
+            // Client: defer ALL logs until movement animation completes
+            _pendingRollLogs = rollLogs;
             _handleRemoteRollEnd(dice1, dice2, state, event);
           }
         }
@@ -510,9 +487,14 @@ class _GameScreenState extends State<GameScreen> {
         break;
 
       case 'move_end':
+        // Skip if we are the roller (host processes via _onRoll directly)
+        if (_isRollInProgress) break;
         final moveState = message['state'] as Map<String, dynamic>?;
-        // Both host and client: finalize movement (clear animation flags).
-        // Host additionally rebroadcasts to other clients.
+        // Client: show ALL deferred roll logs after movement animation completes.
+        if (!isHost && _pendingRollLogs != null) {
+          for (final log in _pendingRollLogs!) { _addLog(log); }
+          _pendingRollLogs = null;
+        }
         _handleRemoteMoveEnd(moveState);
         if (isHost) {
           _networkService?.sendMessage(message);
@@ -523,38 +505,45 @@ class _GameScreenState extends State<GameScreen> {
       case 'state_sync':
         final state = message['state'] as Map<String, dynamic>?;
         final event = message['event'] as Map<String, dynamic>?;
-        final actionLog = message['action_log'] as String?;
-        if (state != null) {
-          debugPrint('[NetSync] Received state_sync (isHost: $isHost)');
+        final actionLogs = (message['action_logs'] as List<dynamic>?)?.cast<String>();
+        final msgId = message['_msg_id'] as String?;
+        // Deduplicate: skip if we've already processed this message (relay echo)
+        if (msgId != null && _processedStateSyncIds.contains(msgId)) break;
+        if (msgId != null) _processedStateSyncIds.add(msgId);
 
-          // Replay the action log so all peers see the same messages
-          if (actionLog != null && actionLog.isNotEmpty) {
-            _addLog(actionLog);
+        if (state != null) {
+          // Replay all action logs so all peers see the same messages
+          if (actionLogs != null) {
+            for (final log in actionLogs) { _addLog(log); }
           }
+
+          final lastLog = (actionLogs != null && actionLogs.isNotEmpty)
+              ? actionLogs.last
+              : 'State synced';
 
           if (isHost) {
             // ── Host received state from a client ─────────────────────
             setState(() {
               _currentState = state;
-              _gameState = _buildGameState(state, lastEvent: actionLog ?? 'State synced');
+              _gameState = _buildGameState(state, lastEvent: lastLog);
             });
-            // Rebroadcast to all other clients (keep action_log)
+            // Rebroadcast to all other clients (keep action_log + same msg_id)
             _networkService?.sendMessage({
               'type': 'state_sync',
               'state': state,
               'event': event,
-              if (actionLog != null) 'action_log': actionLog,
+              if (actionLogs != null) 'action_logs': actionLogs,
+              '_msg_id': msgId,
             });
           } else {
             // ── Client received state from host ───────────────────────
             setState(() {
               _currentState = state;
-              _gameState = _buildGameState(state, lastEvent: actionLog ?? 'State synced');
+              _gameState = _buildGameState(state, lastEvent: lastLog);
             });
           }
-        } else {
-          debugPrint('[NetSync] state_sync with null state');
         }
+        break;
         break;
 
       case 'game_start':
@@ -583,8 +572,8 @@ class _GameScreenState extends State<GameScreen> {
   }
 
   /// Broadcast the final dice result after animation completes.
-  /// [actionLog] is the log message to sync to all peers.
-  void _broadcastRollEnd(int dice1, int dice2, BridgeResponse response, {String? actionLog}) {
+  /// [actionLogs] is the list of log messages to sync to all peers.
+  void _broadcastRollEnd(int dice1, int dice2, BridgeResponse response, {List<String>? actionLogs}) {
     final net = widget.networkService;
     if (net == null || !mounted) return;
     net.sendMessage({
@@ -593,7 +582,7 @@ class _GameScreenState extends State<GameScreen> {
       'dice2': dice2,
       'state': response.state,
       'event': response.event,
-      if (actionLog != null) 'action_log': actionLog,
+      if (actionLogs != null) 'action_logs': actionLogs,
     });
   }
 
@@ -743,29 +732,39 @@ class _GameScreenState extends State<GameScreen> {
     });
   }
 
+  /// Monotonically increasing counter for state_sync message IDs.
+  int _stateSyncCounter = 0;
+  /// Set of processed state_sync message IDs (deduplication for relay echoes).
+  final Set<String> _processedStateSyncIds = {};
+
   /// After executing a game action, sync the resulting state to network peers.
-  /// [actionLog] is included so all peers see the same log messages.
-  void _syncAfterAction(BridgeResponse response, {String? actionLog}) {
+  /// [actionLogs] is the list of log messages so all peers see the same logs.
+  void _syncAfterAction(BridgeResponse response, {List<String>? actionLogs}) {
     final net = widget.networkService;
     if (net == null || !mounted) return;
-    debugPrint('[NetSync] Syncing after action (isHost: ${net.isHost})');
+    _stateSyncCounter++;
+    // Prefix with isHost to avoid ID collisions between host and client
+    // (both start counting from 1 independently).
+    final prefix = net.isHost ? 'h' : 'c';
+    final msgId = '${prefix}s$_stateSyncCounter';
+    _processedStateSyncIds.add(msgId);
     net.sendMessage({
       'type': 'state_sync',
       'state': response.state,
       'event': response.event,
-      if (actionLog != null) 'action_log': actionLog,
+      if (actionLogs != null) 'action_logs': actionLogs,
+      '_msg_id': msgId,
     });
   }
 
   /// Sync the current local state to network peers without a BridgeResponse.
-  void _syncCurrentState({String eventType = 'TileEffect', String? actionLog}) {
+  void _syncCurrentState({String eventType = 'TileEffect'}) {
     final net = widget.networkService;
     if (net == null || !mounted) return;
     net.sendMessage({
       'type': 'state_sync',
       'state': _currentState,
       'event': {'event_type': eventType},
-      if (actionLog != null) 'action_log': actionLog,
     });
   }
 
@@ -775,268 +774,6 @@ class _GameScreenState extends State<GameScreen> {
     _networkService?.dispose();
     _logScrollController.dispose();
     super.dispose();
-  }
-
-  // ---- State builders ------------------------------------------------------
-
-  /// Build the initial GameState JSON map for [numPlayers] players.
-  /// [teamIds] assigns each player to a team (null = no team).
-  Map<String, dynamic> _buildInitialState(int numPlayers, {List<String?>? teamIds}) {
-    // Pick tile source: complex or classic
-    final tileSource = _useComplexBoard ? _complexTiles : _defaultTiles;
-    final tiles = tileSource
-        .map((t) => {
-              'id': t['id'],
-              'name': t['name'],
-              'name_key': 'tile.${t['id']}',
-              'kind': t['kind'],
-              'linked_property_kind': null,
-            })
-        .toList();
-
-    final players = List<Map<String, dynamic>>.generate(
-      numPlayers,
-      (i) => {
-        'id': 'player_$i',
-        'name': 'Player ${i + 1}',
-        'cash': 1500,
-        'position': 'start',
-        'is_ai': i > 0, // Player 1 is human by default
-        'is_llm_controlled': false,
-        'jail_turns': 0,
-        'hospital_turns': 0,
-        'owned_cards': <String>[],
-        'stock_shares': 0,
-        'team_id': teamIds != null && i < teamIds.length ? teamIds[i] : null,
-      },
-    );
-
-    // Classic Monopoly property prices (tile_id → base_price)
-    const prices = <String, int>{
-      'prop_1': 60,   'prop_2': 60,
-      'rr_1': 200,    'rr_2': 200,    'rr_3': 200,    'rr_4': 200,
-      'prop_3': 100,  'prop_4': 100,  'prop_5': 120,
-      'prop_6': 140,  'prop_7': 140,  'prop_8': 160,
-      'prop_9': 180,  'prop_10': 180, 'prop_11': 200,
-      'prop_12': 220, 'prop_13': 220, 'prop_14': 240,
-      'prop_15': 260, 'prop_16': 260, 'prop_17': 280,
-      'prop_18': 300, 'prop_19': 300, 'prop_20': 320,
-      'prop_21': 350, 'prop_22': 400,
-      'util_1': 150,  'util_2': 150,
-    };
-    // Color groups for group rent (tile_id → [linked_targets...])
-    const groups = <String, List<String>>{
-      'prop_1':  ['prop_2'],
-      'prop_2':  ['prop_1'],
-      'prop_3':  ['prop_4', 'prop_5'],
-      'prop_4':  ['prop_3', 'prop_5'],
-      'prop_5':  ['prop_3', 'prop_4'],
-      'prop_6':  ['prop_7', 'prop_8'],
-      'prop_7':  ['prop_6', 'prop_8'],
-      'prop_8':  ['prop_6', 'prop_7'],
-      'rr_1':    ['rr_2', 'rr_3', 'rr_4'],
-      'rr_2':    ['rr_1', 'rr_3', 'rr_4'],
-      'rr_3':    ['rr_1', 'rr_2', 'rr_4'],
-      'rr_4':    ['rr_1', 'rr_2', 'rr_3'],
-      'prop_9':  ['prop_10', 'prop_11'],
-      'prop_10': ['prop_9', 'prop_11'],
-      'prop_11': ['prop_9', 'prop_10'],
-      'prop_12': ['prop_13', 'prop_14'],
-      'prop_13': ['prop_12', 'prop_14'],
-      'prop_14': ['prop_12', 'prop_13'],
-      // prop_16 replaced by card_shop_1 — Yellow group now has 2 members
-      'prop_15': ['prop_17'],
-      'prop_17': ['prop_15'],
-      'prop_18': ['prop_19', 'prop_20'],
-      'prop_19': ['prop_18', 'prop_20'],
-      'prop_20': ['prop_18', 'prop_19'],
-      'prop_21': ['prop_22'],
-      'prop_22': ['prop_21'],
-    };
-
-    // Preset property owners from map JSON "properties[].owner".
-    // Key: tile_id, Value: player_id (e.g. "player_0").
-    // Read from the map JSON's "properties" array at load time.
-    // Until the content pipeline is fully connected, preset owners are empty.
-    const presetOwners = <String, String>{};
-
-    // Build properties from tiles using classic pricing
-    final properties = <Map<String, dynamic>>[];
-    for (final tile in tileSource) {
-      final tid = tile['id'];
-      final price = prices[tid] ?? 0;
-      final owner = presetOwners[tid]; // null → unowned
-      if (tile['kind'] == 'OrdinaryProperty' && price > 0) {
-        properties.add({
-          'tile_id': tid,
-          'name_key': 'prop.$tid',
-          'kind': 'Ordinary',
-          'base_price': price,
-          'rent': <int>[],
-          'upgrade_level': 0,
-          'owner': owner,
-          'is_mortgaged': false,
-          'linked_targets': groups[tid] ?? <String>[],
-        });
-      } else if (tile['kind'] == 'ExtensionProperty' && price > 0) {
-        properties.add({
-          'tile_id': tid,
-          'name_key': 'prop.$tid',
-          'kind': 'Extension',
-          'base_price': price,
-          'rent': <int>[],
-          'upgrade_level': 0,
-          'owner': owner,
-          'is_mortgaged': false,
-          'linked_targets': <String>[],
-        });
-      }
-    }
-
-    // ── Auto-link rent for the complex L‑shaped board ────────────
-    if (_useComplexBoard) {
-      _computeAutoLinks(
-        tileSource,
-        properties,
-        _complexPositions,
-      );
-    }
-
-    return {
-      'board': {
-        'tiles': tiles,
-        'properties': properties,
-        'graph': {'edges': [], 'teleporters': []},
-      },
-      'players': players,
-      'ruleset': {'id': 'classic', 'version': '0.1.0'},
-      'current_turn': 0,
-      'active_player_index': 0,
-      'seed': DateTime.now().microsecondsSinceEpoch,
-      'decks': [],
-      'stock_market': null,
-      'active_auction': null,
-      'consecutive_doubles': 0,
-      'max_upgrade_level': 3,
-      'extension_upgrade_enabled': true,
-      'group_rent_enabled': true,
-      'lottery_state': null,
-      'bail_abuse_count': 0,
-    };
-  }
-
-  /// Auto-link rent computation — split by board edges first.
-  ///
-  /// Rule 1: groups only form within the same board edge (same direction).
-  /// We split the path at direction changes (detected via grid positions),
-  /// then process each edge independently.
-  void _computeAutoLinks(
-      List<Map<String, String>> tileSource,
-      List<Map<String, dynamic>> properties,
-      List<(int, int)> positions) {
-    bool isProp(int ti) =>
-        ti < tileSource.length &&
-        properties.any((p) => p['tile_id'] == tileSource[ti]['id']);
-
-    final manual = properties
-        .where((p) => (p['linked_targets'] as List).isNotEmpty)
-        .map((p) => p['tile_id'] as String)
-        .toSet();
-
-    // ── 0. Split path into edges at direction changes ──────────
-    // A direction change occurs when (Δrow, Δcol) differs between
-    // consecutive tile pairs.
-    final edges = <List<int>>[]; // each edge is a list of tile indices
-    if (positions.length < 2) return;
-
-    var currentEdge = <int>[0];
-    for (int i = 1; i < positions.length; i++) {
-      final pr = positions[i - 1].$1, pc = positions[i - 1].$2;
-      final cr = positions[i].$1, cc = positions[i].$2;
-      final dr = cr - pr, dc = cc - pc;
-
-      if (i < positions.length - 1) {
-        final nr = positions[i + 1].$1, nc = positions[i + 1].$2;
-        final ndr = nr - cr, ndc = nc - cc;
-        if (ndr != dr || ndc != dc) {
-          // Direction changes at tile i → end current edge here
-          currentEdge.add(i);
-          edges.add(List.from(currentEdge));
-          currentEdge = <int>[i];
-          continue;
-        }
-      }
-      currentEdge.add(i);
-    }
-    if (currentEdge.isNotEmpty) edges.add(currentEdge);
-
-    // ── 1..3. Process each edge independently ───────────────────
-    for (final edge in edges) {
-      final edgeRuns = <List<String>>[];
-
-      // Find contiguous property runs within this edge
-      int ei = 0;
-      while (ei < edge.length) {
-        final ti = edge[ei];
-        final tid = tileSource[ti]['id']!;
-        if (!isProp(ti) || manual.contains(tid)) {
-          ei++;
-          continue;
-        }
-        final run = <String>[tid];
-        ei++;
-        while (ei < edge.length) {
-          final nti = edge[ei];
-          final nid = tileSource[nti]['id']!;
-          if (!isProp(nti) || manual.contains(nid)) break;
-          run.add(nid);
-          ei++;
-        }
-        if (run.isNotEmpty) edgeRuns.add(run);
-      }
-
-      // Merge runs within this edge (gap=1, total≥3)
-      final merged = <List<String>>[];
-      int ri = 0;
-      while (ri < edgeRuns.length) {
-        final cluster = <String>[...edgeRuns[ri]];
-        ri++;
-        while (ri < edgeRuns.length) {
-          final lastId = cluster.last;
-          final nextId = edgeRuns[ri].first;
-          int gap = 0;
-          bool counting = false;
-          for (final t in tileSource) {
-            if (t['id'] == lastId) {
-              counting = true;
-              continue;
-            }
-            if (t['id'] == nextId) break;
-            if (counting) gap++;
-          }
-          final total = cluster.length + edgeRuns[ri].length;
-          if (gap != 1 || total < 3) break;
-          cluster.addAll(edgeRuns[ri]);
-          ri++;
-        }
-        merged.add(cluster);
-      }
-
-      // Set linked_targets (max 5)
-      for (final group in merged) {
-        final g = group.length > 5 ? group.sublist(0, 5) : group;
-        if (g.length < 2) continue;
-        for (final tid in g) {
-          final prop = properties.firstWhere(
-            (p) => p['tile_id'] == tid,
-            orElse: () => <String, dynamic>{},
-          );
-          if (prop.isNotEmpty) {
-            prop['linked_targets'] = g.where((id) => id != tid).toList();
-          }
-        }
-      }
-    }
   }
 
   /// Build a [GameStateData] from a raw state JSON map.
@@ -1105,32 +842,186 @@ class _GameScreenState extends State<GameScreen> {
   }
 
   void _addLog(String message) {
-    final updatedLog = List<String>.from(_gameState.eventLog)
-      ..insert(0, message);
+    final entry = EventLogEntry(message, category: EventLogEntry.inferCategory(message));
+    final updatedLog = List<EventLogEntry>.from(_gameState.eventLog)
+      ..insert(0, entry);
     // Detect plugin messages and add to pluginMessages list
     List<String> updatedPluginMsgs = List.from(_gameState.pluginMessages);
     if (message.startsWith('[DiceStats]') || message.startsWith('[TreasureHunt]')) {
       updatedPluginMsgs.insert(0, message);
       if (updatedPluginMsgs.length > 20) updatedPluginMsgs.removeLast();
     }
-    setState(() {
-      _gameState = _gameState.copyWith(
-        eventLog: updatedLog,
-        pluginMessages: updatedPluginMsgs,
+    if (mounted) {
+      setState(() {
+        _gameState = _gameState.copyWith(
+          eventLog: updatedLog,
+          pluginMessages: updatedPluginMsgs,
+        );
+      });
+    }
+  }
+
+  // ---- Game initialisation via Rust engine ---------------------------------
+
+  /// Load map JSON from assets and send `create_game` to Rust.
+  /// On success, updates `_currentState` and `_gameState`.
+  Future<void> _initGameFromRust() async {
+    try {
+      // Use the mapId passed from map selection; fall back to 'classic'
+      final mapId = widget.mapId ?? (_useComplexBoard ? 'complex' : 'classic');
+      final mapJson = await rootBundle.loadString('assets/maps/$mapId.json');
+
+      final mapData = jsonDecode(mapJson) as Map<String, dynamic>;
+      final playerCount = widget.initialPlayerCount ?? 2;
+      final players = List<Map<String, dynamic>>.generate(
+        playerCount,
+        (i) => {
+          'id': 'player_$i',
+          'name': (widget.playerNames != null && i < widget.playerNames!.length)
+              ? widget.playerNames![i]
+              : 'Player ${i + 1}',
+          'cash': CommandConstants.startingCash,
+          'position': 'start',
+          'is_ai': widget.aiFlags != null && i < widget.aiFlags!.length
+              ? widget.aiFlags![i]
+              : i > 0,
+          'is_llm_controlled': false,
+          'jail_turns': 0,
+          'hospital_turns': 0,
+          'owned_cards': <String>[],
+          'stock_shares': 0,
+          'team_id': null,
+        },
       );
-    });
+
+      final response = await _bridgeClient.executeCommand(
+        command: BridgeCommand.createGame(mapData, players,
+            seed: DateTime.now().microsecondsSinceEpoch),
+        currentState: {},
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _currentState = response.state;
+        _gameState = _buildGameState(response.state, lastEvent: 'Game started');
+        _landedTileIdThisTurn = null;
+      });
+      // Broadcast game_start to connected network clients (host only)
+      if (_networkService != null && _networkService!.isHost) {
+        _networkService!.sendMessage({
+          'type': 'game_start',
+          'state': response.state,
+        });
+      }
+      _addLog('Game started with ${_gameState.numPlayers} players');
+    } catch (e) {
+      _addLog('Rust init failed: $e');
+      if (mounted) setState(() {});
+      rethrow;
+    }
+  }
+
+  // ---- Game restart via Rust engine ----------------------------------------
+
+  /// Restart the game using Rust's `create_game` instead of Flutter-side
+  /// `_buildInitialState`. Loads the map JSON from assets and sends it to
+  /// the Rust engine together with player definitions.
+  Future<void> _restartGame(
+      int count, List<String> playerNames, List<bool> aiFlags) async {
+    try {
+      final mapId = widget.mapId ?? 'classic';
+      final mapJson = await rootBundle.loadString('assets/maps/$mapId.json');
+      final mapData = jsonDecode(mapJson) as Map<String, dynamic>;
+
+      final players = List<Map<String, dynamic>>.generate(
+        count,
+        (i) => {
+          'id': 'player_$i',
+          'name': i < playerNames.length ? playerNames[i] : 'Player ${i + 1}',
+          'cash': CommandConstants.startingCash,
+          'position': 'start',
+          'is_ai': i < aiFlags.length ? aiFlags[i] : i > 0,
+          'is_llm_controlled': false,
+          'jail_turns': 0,
+          'hospital_turns': 0,
+          'owned_cards': <String>[],
+          'stock_shares': 0,
+          'team_id': null,
+        },
+      );
+
+      final response = await _bridgeClient.executeCommand(
+        command: BridgeCommand.createGame(mapData, players,
+            seed: DateTime.now().microsecondsSinceEpoch),
+        currentState: {},
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _currentState = response.state;
+        _gameState = _buildGameState(response.state, lastEvent: 'Game restarted');
+        _landedTileIdThisTurn = null;
+      });
+      _addLog('Game restarted with $count players');
+    } catch (e) {
+      _addLog('Restart failed: $e');
+      if (mounted) setState(() {});
+    }
   }
 
   // ---- Event dispatcher helper ---------------------------------------------
 
-  /// Build default [EventCallbacks] wired to this game screen's methods.
-  EventCallbacks _defaultCallbacks() {
-    return EventCallbacks(
-      addLog: _addLog,
-      showCardShop: _showCardShopDialog,
-      showLottery: () => _showLotteryPickerDialog(),
-      showChanceCard: _showChanceCardDialog,
-      showAuction: (tid, bid) => _showAuctionDialog(tid, bid),
+  /// Register event subscribers for UI-trigger events (CardShop, Lottery, Auction).
+  /// These are invoked via the subscriber pattern instead of callback parameters.
+  void _registerEventSubscriptions() {
+    // ── 保留现有的 UI 动作订阅 ─────────────────────────────────────────
+    EventDispatcher.subscribe(
+      'core:card_shop_landed',
+      EventSubscriber(handler: (event) => _showCardShopDialog(), isUiAction: true),
+    );
+    EventDispatcher.subscribe(
+      'core:lottery_landed',
+      EventSubscriber(handler: (event) => _showLotteryPickerDialog(), isUiAction: true),
+    );
+    EventDispatcher.subscribe(
+      'core:auction_started_event',
+      EventSubscriber(handler: (event) {
+        final tid = event['tile_id'] as String? ?? '';
+        final bid = (event['starting_bid'] as num?)?.toInt() ?? 0;
+        _showAuctionDialog(tid, bid);
+      }, isUiAction: true),
+    );
+
+    // ── 地产购买事件 → 日志由 _handleLog 处理，无需额外操作 ──────────
+
+    // ── 玩家回合开始事件 → 日志由 _handleLog 处理 ─────────────────────
+
+    // ── 新增：玩家进监狱事件 ───────────────────────────────────────────
+    EventDispatcher.subscribe(
+      'core:player_sent_to_jail_event',
+      EventSubscriber(handler: (event) {
+        final pid = event['player_id'] as String? ?? '';
+        final turns = event['turns'] as int? ?? GameDefaults.baseJailTurns;
+        _addLog('$pid sent to jail for $turns turns');
+      }, isUiAction: true),
+    );
+
+    // ── 新增：玩家胜利事件 ─────────────────────────────────────────────
+    EventDispatcher.subscribe(
+      'core:player_won',
+      EventSubscriber(handler: (event) {
+        final pid = event['player_id'] as String? ?? '';
+        _addLog('🎉 $pid wins the game!');
+      }, isUiAction: true),
+    );
+
+    // ── 新增：玩家破产事件 ─────────────────────────────────────────────
+    EventDispatcher.subscribe(
+      'core:player_bankrupt_event',
+      EventSubscriber(handler: (event) {
+        final pid = event['player_id'] as String? ?? '';
+        _addLog('$pid is bankrupt!');
+      }, isUiAction: true),
     );
   }
 
@@ -1155,10 +1046,12 @@ class _GameScreenState extends State<GameScreen> {
       currentState: _currentState,
     );
 
-    // 3b. Dispatch ALL events through EventDispatcher
+    // 3b. Dispatch ALL events through EventDispatcher with deferred UI actions.
+    //     UI-trigger subscribers (CardShop, Lottery, Auction) are collected into
+    //     pendingUiActions and executed after the movement animation completes.
     final dispatchResult = EventDispatcher.dispatch(
       response: response,
-      callbacks: _defaultCallbacks(),
+      deferUiActions: true,
     );
 
     final dice1 = dispatchResult.dice1;
@@ -1179,7 +1072,7 @@ class _GameScreenState extends State<GameScreen> {
         _isAnimating = false;
       });
       _broadcastRollEnd(dice1, dice2, response,
-          actionLog: dispatchResult.lastLog);
+          actionLogs: dispatchResult.logs);
       return;
     }
 
@@ -1203,7 +1096,7 @@ class _GameScreenState extends State<GameScreen> {
 
     // 6. Broadcast roll_end to network peers
     _broadcastRollEnd(dice1, dice2, response,
-        actionLog: dispatchResult.lastLog);
+        actionLogs: dispatchResult.logs);
 
     // 7. Apply final state locally (position already updated by engine).
     //    Override the token position back to pre-roll so it doesn't
@@ -1234,14 +1127,6 @@ class _GameScreenState extends State<GameScreen> {
       _isRollingDice = false;
       // Keep _isAnimating for the movement phase below
     });
-    // ═══ 插件消息检测 ═══════════════════════════════════════════════
-    // DiceStats 插件输出
-    final pluginMsg = response.event['_plugin_msg'] as String?;
-    if (pluginMsg != null) _addLog(pluginMsg);
-    // TreasureHunt 插件输出
-    final treasureMsg = response.event['_plugin_msg_treasure'] as String?;
-    if (treasureMsg != null) _addLog(treasureMsg);
-    // ══════════════════════════════════════════════════════════════
 
     // Skip tile effect + movement when stuck in jail (player didn't move).
     if (isJailRoll) {
@@ -1267,15 +1152,37 @@ class _GameScreenState extends State<GameScreen> {
       _animatedPositions.clear();
       _broadcastMoveEnd();
     }
-    _isAnimating = false;
-    setState(() {}); // refresh UI after animating
 
-    // 9. Resolve special tile effects
+    // ═══ 延迟，确保棋子移动动画播放完毕后再显示特殊地块UI ═══
+    setState(() {}); // show final token position
+    await Future.delayed(const Duration(milliseconds: 300));
+    // ════════════════════════════════════════════════════════
+
+    // ═══ 插件消息检测（动画完成后显示）══════════════════════
+    // DiceStats 插件输出
+    final pluginMsg = response.event['_plugin_msg'] as String?;
+    if (pluginMsg != null) _addLog(pluginMsg);
+    // TreasureHunt 插件输出
+    final treasureMsg = response.event['_plugin_msg_treasure'] as String?;
+    if (treasureMsg != null) _addLog(treasureMsg);
+    // ════════════════════════════════════════════════════════
+
+    // Execute deferred UI actions and display event logs
+    // (runs after movement animation completes)
+    for (final log in dispatchResult.logs) {
+      _addLog(log);
+    }
+    for (final uiAction in dispatchResult.pendingUiActions) {
+      uiAction.execute();
+    }
+
+    // 9. Determine current player position
     final playerPos =
         _currentState['players'][_gameState.activePlayerIndex]['position'];
-    await _resolveTileEffect(playerPos);
-    // Sync tile-effect changes (tax, chance card, jail, etc.) to peers
-    _syncCurrentState(eventType: 'TileEffect');
+
+    // 10. All tile effects resolved — now allow the Roll button
+    _isAnimating = false;
+    setState(() {}); // refresh UI + re-enable Roll button
 
     // Record which tile the player just landed on (buy/upgrade only allowed
     // on the turn they first arrive).
@@ -1298,7 +1205,7 @@ class _GameScreenState extends State<GameScreen> {
       if (owner == null) {
         _showBuyPropertyDialog(playerPos, property);
       } else if (owner == playerId) {
-        final maxLevel = (_currentState['max_upgrade_level'] as num?)?.toInt() ?? 3;
+        final maxLevel = (_currentState['max_upgrade_level'] as num?)?.toInt() ?? GameDefaults.maxUpgradeLevel;
         final currentLevel = (property['upgrade_level'] as num?)?.toInt() ?? 0;
         if (maxLevel > 0 && currentLevel < maxLevel) {
           _showUpgradePropertyDialog(playerPos, property);
@@ -1319,10 +1226,10 @@ class _GameScreenState extends State<GameScreen> {
       command: BridgeCommand.payRent(tileId),
       currentState: _currentState,
     );
-    final r = EventDispatcher.dispatch(
-      response: response,
-      callbacks: _defaultCallbacks(),
-    );
+    final r = EventDispatcher.dispatch(response: response);
+    for (final log in r.logs) {
+      _addLog(log);
+    }
     setState(() {
       _currentState = response.state;
       _gameState = _buildGameState(
@@ -1330,82 +1237,19 @@ class _GameScreenState extends State<GameScreen> {
         lastEvent: r.lastLog,
       );
     });
-    _syncAfterAction(response, actionLog: r.lastLog);
+    _syncAfterAction(response, actionLogs: r.logs);
   }
 
-  /// Resolve the effect of the tile the active player landed on.
-  /// Mirrors [crate::effects::EffectResolver::resolve_special_tile].
-  Future<void> _resolveTileEffect(String tileId) async {
-    final rawTiles = (_currentState['board'] as Map<String, dynamic>?)?
-        ['tiles'] as List<dynamic>? ?? [];
-    final tileData = rawTiles.cast<Map<String, dynamic>>().firstWhere(
-      (t) => t['id'] == tileId,
-      orElse: () => <String, dynamic>{},
-    );
-    if (tileData.isEmpty) return;
-
-    final kind = tileData['kind'] as String? ?? '';
-    final name = tileData['name'] as String? ?? tileId;
-
-    switch (kind) {
-      case 'Start':
-        _addLog('Landed on Start');
-        break;
-
-      case 'Chance':
-        await _showChanceCardDialog();
-        break;
-
-      case 'Bank':
-        // Income Tax / Luxury Tax / Free Parking
-        if (tileId == 'tax_1') {
-          // Income Tax: pay $200
-          _deductCash(_gameState.activePlayerIndex, 200);
-          _addLog('Paid Income Tax: -\$200');
-        } else if (tileId == 'tax_2') {
-          // Luxury Tax: pay $100
-          _deductCash(_gameState.activePlayerIndex, 100);
-          _addLog('Paid Luxury Tax: -\$100');
-        } else {
-          // Free Parking: bonus $200
-          _addCash(_gameState.activePlayerIndex, 200);
-          _addLog('Free Parking bonus: +\$200');
-        }
-        break;
-
-      case 'Jail':
-        if (tileId == 'go_to_jail') {
-          // Send to jail
-          _sendToJail(_gameState.activePlayerIndex);
-          _addLog('Go to Jail!');
-        } else {
-          // Just visiting
-          _addLog('Just visiting Jail');
-        }
-        break;
-
-      case 'CardShop':
-        await _showCardShopDialog();
-        break;
-
-      case 'Lottery':
-        await _showLotteryPickerDialog();
-        break;
-
-      default:
-        break;
-    }
-  }
 
   Future<void> _onBuyCard(String cardId, int price) async {
     final response = await _bridgeClient.executeCommand(
       command: BridgeCommand.buyCard(cardId, price),
       currentState: _currentState,
     );
-    final r = EventDispatcher.dispatch(
-      response: response,
-      callbacks: _defaultCallbacks(),
-    );
+    final r = EventDispatcher.dispatch(response: response);
+    for (final log in r.logs) {
+      _addLog(log);
+    }
     setState(() {
       _currentState = response.state;
       _gameState = _buildGameState(
@@ -1413,7 +1257,7 @@ class _GameScreenState extends State<GameScreen> {
         lastEvent: r.lastLog,
       );
     });
-    _syncAfterAction(response, actionLog: r.lastLog);
+    _syncAfterAction(response, actionLogs: r.logs);
   }
 
   /// Pay bail to get out of jail early.
@@ -1422,10 +1266,10 @@ class _GameScreenState extends State<GameScreen> {
       command: BridgeCommand.payBail(),
       currentState: _currentState,
     );
-    final r = EventDispatcher.dispatch(
-      response: response,
-      callbacks: _defaultCallbacks(),
-    );
+    final r = EventDispatcher.dispatch(response: response);
+    for (final log in r.logs) {
+      _addLog(log);
+    }
     setState(() {
       _currentState = response.state;
       _gameState = _buildGameState(
@@ -1433,7 +1277,7 @@ class _GameScreenState extends State<GameScreen> {
         lastEvent: r.lastLog,
       );
     });
-    _syncAfterAction(response, actionLog: r.lastLog);
+    _syncAfterAction(response, actionLogs: r.logs);
   }
 
   Future<void> _onUseCard(String cardId) async {
@@ -1441,15 +1285,15 @@ class _GameScreenState extends State<GameScreen> {
       command: BridgeCommand.useCard(cardId),
       currentState: _currentState,
     );
-    final r = EventDispatcher.dispatch(
-      response: response,
-      callbacks: _defaultCallbacks(),
-    );
+    final r = EventDispatcher.dispatch(response: response);
+    for (final log in r.logs) {
+      _addLog(log);
+    }
     setState(() {
       _currentState = response.state;
       _gameState = _buildGameState(response.state, lastEvent: r.lastLog);
     });
-    _syncAfterAction(response, actionLog: r.lastLog);
+    _syncAfterAction(response, actionLogs: r.logs);
   }
 
   Future<void> _onBuyLotteryTicket(int number) async {
@@ -1457,16 +1301,16 @@ class _GameScreenState extends State<GameScreen> {
       command: BridgeCommand.buyLotteryTicket(number),
       currentState: _currentState,
     );
-    final r = EventDispatcher.dispatch(
-      response: response,
-      callbacks: _defaultCallbacks(),
-    );
+    final r = EventDispatcher.dispatch(response: response);
+    for (final log in r.logs) {
+      _addLog(log);
+    }
     setState(() {
       _currentState = response.state;
       _gameState =
           _buildGameState(response.state, lastEvent: r.lastLog);
     });
-    _syncAfterAction(response, actionLog: r.lastLog);
+    _syncAfterAction(response, actionLogs: r.logs);
   }
 
   Future<void> _showCardShopDialog() async {
@@ -1501,122 +1345,13 @@ class _GameScreenState extends State<GameScreen> {
     await showDialog(
       context: context,
       builder: (ctx) => LotteryPickerDialog(
-        jackpot: 500,
-        ticketPrice: 50,
-        nextDrawTurn: 15,
+        jackpot: LotteryConstants.baseJackpot,
+        ticketPrice: LotteryConstants.baseTicketPrice,
+        nextDrawTurn: LotteryConstants.drawCycle,
         alreadyPicked: false,
         onPick: (number) => _onBuyLotteryTicket(number),
       ),
     );
-  }
-
-  void _deductCash(int playerIdx, int amount) {
-    setState(() {
-      final players = List<Map<String, dynamic>>.from(
-          _currentState['players'] as List<dynamic>? ?? []);
-      if (playerIdx < players.length) {
-        final player = Map<String, dynamic>.from(players[playerIdx]);
-        player['cash'] = ((player['cash'] as num?)?.toInt() ?? 0) - amount;
-        players[playerIdx] = player;
-        _currentState['players'] = players;
-        _gameState = _buildGameState(_currentState, lastEvent: '-\$$amount');
-      }
-    });
-  }
-
-  void _addCash(int playerIdx, int amount) {
-    setState(() {
-      final players = List<Map<String, dynamic>>.from(
-          _currentState['players'] as List<dynamic>? ?? []);
-      if (playerIdx < players.length) {
-        final player = Map<String, dynamic>.from(players[playerIdx]);
-        player['cash'] = ((player['cash'] as num?)?.toInt() ?? 0) + amount;
-        players[playerIdx] = player;
-        _currentState['players'] = players;
-        _gameState = _buildGameState(_currentState, lastEvent: '+\$$amount');
-      }
-    });
-  }
-
-  void _sendToJail(int playerIdx) {
-    setState(() {
-      final players = List<Map<String, dynamic>>.from(
-          _currentState['players'] as List<dynamic>? ?? []);
-      if (playerIdx < players.length) {
-        final player = Map<String, dynamic>.from(players[playerIdx]);
-        player['position'] = 'jail';
-        // Apply bail-abuse penalty: if bail was used before, add 1 turn
-        final abuseCount = (_currentState['bail_abuse_count'] as num?)?.toInt() ?? 0;
-        final extra = abuseCount > 0 ? 1 : 0;
-        player['jail_turns'] = 3 + extra;
-        _currentState['bail_abuse_count'] = 0; // Reset after applying
-        players[playerIdx] = player;
-        _currentState['players'] = players;
-        _gameState = _buildGameState(_currentState, lastEvent: 'Sent to jail');
-      }
-    });
-  }
-
-  Future<void> _showChanceCardDialog() async {
-    final messages = [
-      'Advance to Go. Collect \$200',
-      'Bank error in your favor. Collect \$200',
-      'Doctor\'s fee. Pay \$50',
-      'Go to Jail. Go directly to Jail',
-      'Holiday fund matures. Collect \$100',
-      'Income tax refund. Collect \$20',
-      'Pay hospital fees of \$100',
-      'Receive \$25 consultancy fee',
-      'You are assessed for street repairs: \$40 per house',
-      'You have won a crossword competition. Collect \$100',
-    ];
-    final msg = messages[DateTime.now().millisecondsSinceEpoch % messages.length];
-    final isGood = msg.startsWith('Advance') ||
-        msg.startsWith('Bank') ||
-        msg.startsWith('Holiday') ||
-        msg.startsWith('Income') ||
-        msg.startsWith('Receive') ||
-        msg.startsWith('You have won');
-
-    if (!mounted) return;
-    await showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Chance Card'),
-        content: Text(msg),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('OK'),
-          ),
-        ],
-      ),
-    );
-
-    if (!isGood) {
-      // Pay the fee if applicable
-      if (msg.contains('\$50')) {
-        _deductCash(_gameState.activePlayerIndex, 50);
-      } else if (msg.contains('\$100') && !msg.contains('collect')) {
-        _deductCash(_gameState.activePlayerIndex, 100);
-      } else if (msg.contains('\$40')) {
-        _deductCash(_gameState.activePlayerIndex, 40);
-      }
-    } else {
-      if (msg.contains('\$200') && !msg.contains('assessed')) {
-        _addCash(_gameState.activePlayerIndex, 200);
-      } else if (msg.contains('\$100')) {
-        _addCash(_gameState.activePlayerIndex, 100);
-      } else if (msg.contains('\$20')) {
-        _addCash(_gameState.activePlayerIndex, 20);
-      } else if (msg.contains('\$25')) {
-        _addCash(_gameState.activePlayerIndex, 25);
-      }
-    }
-    if (msg.contains('Go to Jail')) {
-      _sendToJail(_gameState.activePlayerIndex);
-    }
-    _addLog('Chance: $msg');
   }
 
   /// Save the current game state to disk.
@@ -1681,10 +1416,10 @@ class _GameScreenState extends State<GameScreen> {
       command: BridgeCommand.endTurn(),
       currentState: _currentState,
     );
-    final r = EventDispatcher.dispatch(
-      response: response,
-      callbacks: _defaultCallbacks(),
-    );
+    final r = EventDispatcher.dispatch(response: response);
+    for (final log in r.logs) {
+      _addLog(log);
+    }
     _lastDiceResult = {}; // Clear dice display on turn end
     setState(() {
       _currentState = response.state;
@@ -1695,7 +1430,7 @@ class _GameScreenState extends State<GameScreen> {
       _rollsRemainingThisTurn = 1;
       _landedTileIdThisTurn = null;
     });
-    _syncAfterAction(response, actionLog: r.lastLog);
+    _syncAfterAction(response, actionLogs: r.logs);
   }
 
   Future<void> _onBuyProperty(String tileId) async {
@@ -1703,10 +1438,10 @@ class _GameScreenState extends State<GameScreen> {
       command: BridgeCommand.buyProperty(tileId),
       currentState: _currentState,
     );
-    final r = EventDispatcher.dispatch(
-      response: response,
-      callbacks: _defaultCallbacks(),
-    );
+    final r = EventDispatcher.dispatch(response: response);
+    for (final log in r.logs) {
+      _addLog(log);
+    }
     setState(() {
       _currentState = response.state;
       _gameState = _buildGameState(
@@ -1714,7 +1449,7 @@ class _GameScreenState extends State<GameScreen> {
         lastEvent: r.lastLog,
       );
     });
-    _syncAfterAction(response, actionLog: r.lastLog);
+    _syncAfterAction(response, actionLogs: r.logs);
   }
 
   Future<void> _onUpgradeProperty(String tileId) async {
@@ -1722,10 +1457,10 @@ class _GameScreenState extends State<GameScreen> {
       command: BridgeCommand.upgradeProperty(tileId),
       currentState: _currentState,
     );
-    final r = EventDispatcher.dispatch(
-      response: response,
-      callbacks: _defaultCallbacks(),
-    );
+    final r = EventDispatcher.dispatch(response: response);
+    for (final log in r.logs) {
+      _addLog(log);
+    }
     setState(() {
       _currentState = response.state;
       _gameState = _buildGameState(
@@ -1733,7 +1468,7 @@ class _GameScreenState extends State<GameScreen> {
         lastEvent: r.lastLog,
       );
     });
-    _syncAfterAction(response, actionLog: r.lastLog);
+    _syncAfterAction(response, actionLogs: r.logs);
   }
 
   /// Show a detailed property information dialog using state-based overlay.
@@ -1800,7 +1535,7 @@ class _GameScreenState extends State<GameScreen> {
     // Rent is always derived from base_price (formula: base_price * (1+level) / 10).
     // The separate `rent[]` array in map data is ignored for calculation; it exists
     // only for backward compatibility.
-    final currentRent = basePrice * (1 + level) ~/ 10;
+    final currentRent = PropertyFormulas.rent(basePrice, level);
     int groupRent = 0;
     int groupCount = 1;
     final linkedTargets = isProperty
@@ -1827,9 +1562,9 @@ class _GameScreenState extends State<GameScreen> {
       groupRent += currentRent;
     }
     // Upgrade cost formula: base_price * (1 + level) / 3
-    final upgradeCost = basePrice * (1 + level) ~/ 3;
+    final upgradeCost = PropertyFormulas.upgradeCost(basePrice, level);
     final maxLevel =
-        (_currentState['max_upgrade_level'] as num?)?.toInt() ?? 3;
+        (_currentState['max_upgrade_level'] as num?)?.toInt() ?? GameDefaults.maxUpgradeLevel;
     final canUpgrade = ownerId != null && level < maxLevel;
 
     Color tileColor;
@@ -2012,7 +1747,7 @@ class _GameScreenState extends State<GameScreen> {
     final currentLevel = (property['upgrade_level'] as num?)?.toInt() ?? 0;
     final basePrice = (property['base_price'] as num).toInt();
     // upgrade_cost = base_price * (1 + current_level) / 3
-    final cost = basePrice * (1 + currentLevel) ~/ 3;
+    final cost = PropertyFormulas.upgradeCost(basePrice, currentLevel);
     final player = _gameState.players[_gameState.activePlayerIndex];
     final canAfford = player.cash >= cost;
 
@@ -2155,20 +1890,7 @@ class _GameScreenState extends State<GameScreen> {
         initialPlayerCount: _gameState.numPlayers,
         onStart: (count, playerNames, aiFlags) {
           Navigator.of(ctx).pop();
-          setState(() {
-            _currentState = _buildInitialState(count);
-            // Apply custom names and AI flags
-            final players =
-                _currentState['players'] as List<Map<String, dynamic>>;
-            for (var i = 0; i < count && i < playerNames.length; i++) {
-              players[i]['name'] = playerNames[i];
-              players[i]['is_ai'] = aiFlags[i];
-            }
-            _currentState['players'] = players;
-            _gameState = _buildGameState(_currentState,
-                lastEvent: 'Game reset');
-          });
-          _addLog('Game restarted with $count players');
+          _restartGame(count, playerNames, aiFlags);
         },
       ),
     );
@@ -2176,19 +1898,94 @@ class _GameScreenState extends State<GameScreen> {
 
   // ---- Build ---------------------------------------------------------------
 
-  /// Build a lookup map of tile_id → display name from the initial tile source.
+  /// Build a lookup map of tile_id → display name.
   /// Needed because the Rust `Tile` struct only has `name_key`, not `name`.
   Map<String, String> get _tileNames {
-    final tileSource = _useComplexBoard ? _complexTiles : _defaultTiles;
-    final map = <String, String>{};
-    for (final t in tileSource) {
-      map[t['id']!] = t['name']!;
-    }
-    return map;
+    // Classic 40-tile board display names
+    const classicNames = <String, String>{
+      'start': 'Start',
+      'prop_1': 'Mediterranean Ave',
+      'chance_1': 'Chance',
+      'prop_2': 'Baltic Ave',
+      'tax_1': 'Income Tax',
+      'rr_1': 'Reading RR',
+      'prop_3': 'Oriental Ave',
+      'lottery_1': 'Lottery',
+      'prop_4': 'Vermont Ave',
+      'prop_5': 'Connecticut Ave',
+      'jail': 'Jail',
+      'prop_6': 'St. Charles Pl',
+      'util_1': 'Electric Co',
+      'prop_7': 'States Ave',
+      'prop_8': 'Virginia Ave',
+      'rr_2': 'Penn RR',
+      'prop_9': 'St. James Pl',
+      'chance_3': 'Chance',
+      'prop_10': 'Tennessee Ave',
+      'prop_11': 'New York Ave',
+      'park': 'Free Parking',
+      'prop_12': 'Kentucky Ave',
+      'chance_4': 'Chance',
+      'prop_13': 'Indiana Ave',
+      'prop_14': 'Illinois Ave',
+      'rr_3': 'B&O RR',
+      'prop_15': 'Atlantic Ave',
+      'card_shop_1': 'Card Shop',
+      'util_2': 'Water Works',
+      'prop_17': 'Marvin Gardens',
+      'go_to_jail': 'Go To Jail',
+      'prop_18': 'Pacific Ave',
+      'prop_19': 'N. Carolina Ave',
+      'chance_5': 'Chance',
+      'prop_20': 'Pennsylvania Ave',
+      'rr_4': 'Short Line',
+      'reserve_1': 'Expansion Slot',
+      'prop_21': 'Park Place',
+      'tax_2': 'Luxury Tax',
+      'prop_22': 'Boardwalk',
+    };
+
+    // Complex 16-tile L-shaped board display names
+    const complexNames = <String, String>{
+      'start': 'Start',
+      'prop_1': 'Med Ave',
+      'chance_1': 'Chance',
+      'prop_2': 'Baltic Ave',
+      'tax_1': 'Income Tax',
+      'prop_3': 'Oriental Ave',
+      'rr_1': 'Reading RR',
+      'corner_1': '↱ Up Turn',
+      'chance_2': 'Community',
+      'corner_2': '↰ Left Turn',
+      'prop_4': 'Vermont Ave',
+      'prop_5': 'Conn Ave',
+      'corner_3': '↖ Top',
+      'util_1': 'Electric Co',
+      'prop_6': 'St Charles',
+      'corner_4': '↙ Down Turn',
+    };
+
+    return _useComplexBoard ? complexNames : classicNames;
   }
 
   @override
   Widget build(BuildContext context) {
+    // Show loading screen while async init is in progress
+    if (_gameState.players.isEmpty) {
+      return const Scaffold(
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(height: 16),
+              Text('Initializing game...'),
+            ],
+          ),
+        ),
+      );
+    }
+
     final activePlayer =
         _gameState.players.isNotEmpty &&
                 _gameState.activePlayerIndex < _gameState.players.length
@@ -2538,7 +2335,7 @@ class _GameScreenState extends State<GameScreen> {
         ? ((players[activeIdx] as Map<String, dynamic>)['jail_turns'] as num?)?.toInt() ?? 0
         : 0;
     final isInJail = jailTurns > 0;
-    final bailAmount = jailTurns * 50;
+    final bailAmount = jailTurns * CommandConstants.bailPerTurn;
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -2588,12 +2385,25 @@ class _GameScreenState extends State<GameScreen> {
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
       itemCount: events.length,
       itemBuilder: (context, index) {
-        return Text(
-          events[index],
-          style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: Colors.grey.shade600,
-                fontSize: 11,
+        final entry = events[index];
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 1),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(entry.icon, size: 14, color: entry.color),
+              const SizedBox(width: 4),
+              Expanded(
+                child: Text(
+                  entry.message,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: entry.color.withOpacity(0.85),
+                        fontSize: 11,
+                      ),
+                ),
               ),
+            ],
+          ),
         );
       },
     );
@@ -2764,12 +2574,12 @@ class _GameSettingsDialogState extends State<_GameSettingsDialog>
       theme: _themeCtrl.text,
     ));
     widget.configProvider.updateGame(GameConfig(
-      startingCash: int.tryParse(_startCashCtrl.text) ?? 1500,
-      maxPlayers: int.tryParse(_maxPlayersCtrl.text) ?? 4,
-      passStartBonus: int.tryParse(_passBonusCtrl.text) ?? 200,
-      jailEscapeTurns: int.tryParse(_jailTurnsCtrl.text) ?? 3,
-      hospitalRecoveryTurns: int.tryParse(_hospitalTurnsCtrl.text) ?? 2,
-      maxUpgradeLevel: int.tryParse(_maxUpgradeCtrl.text) ?? 3,
+      startingCash: int.tryParse(_startCashCtrl.text) ?? CommandConstants.startingCash,
+      maxPlayers: int.tryParse(_maxPlayersCtrl.text) ?? CommandConstants.maxPlayers,
+      passStartBonus: int.tryParse(_passBonusCtrl.text) ?? CommandConstants.passStartBonus,
+      jailEscapeTurns: int.tryParse(_jailTurnsCtrl.text) ?? GameDefaults.baseJailTurns,
+      hospitalRecoveryTurns: int.tryParse(_hospitalTurnsCtrl.text) ?? CommandConstants.hospitalRecoveryTurns,
+      maxUpgradeLevel: int.tryParse(_maxUpgradeCtrl.text) ?? GameDefaults.maxUpgradeLevel,
       extensionUpgradeEnabled: _extensionUpgradeEnabled,
       groupRentEnabled: _groupRentEnabled,
       stockMarketEnabled: _stockMarketEnabled,
@@ -2862,7 +2672,7 @@ class _GameSettingsDialogState extends State<_GameSettingsDialog>
               ),
             ),
             IconButton(
-              onPressed: _playerCount < 6
+              onPressed: _playerCount < CommandConstants.maxPlayers
                   ? () => _updatePlayerCount(_playerCount + 1)
                   : null,
               icon: const Icon(Icons.add_circle_outline),

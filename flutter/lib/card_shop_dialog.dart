@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'game_constants.dart';
+
 /// Card shop data for a purchasable card.
 class CardShopItem {
   final String id;
@@ -17,7 +19,7 @@ class CardShopItem {
 
 /// Predefined cards available at the card shop.
 ///
-/// Prices MUST match the server-side constants in [crate::engine::CARD_PRICES].
+/// Prices MUST match the server-side constants in [CommandConstants].
 /// The engine rejects any purchase with a mismatched price.
 /// `skip_turn` is excluded because its effect (skip own turn) is strictly
 /// detrimental; it may be re-added with a reworked effect in the future.
@@ -26,19 +28,19 @@ const List<CardShopItem> kCardShopItems = [
     id: 'get_out_of_jail',
     name: 'Get Out of Jail',
     description: 'Exit jail immediately',
-    price: 150,
+    price: CommandConstants.cardPriceGetOutOfJail,
   ),
   CardShopItem(
     id: 'bonus_200',
     name: 'Bonus \$200',
     description: 'Receive \$200 cash',
-    price: 100,
+    price: CommandConstants.cardPriceBonus200,
   ),
   CardShopItem(
     id: 'double_rent',
     name: 'Double Rent',
     description: 'Next rent payment is doubled',
-    price: 200,
+    price: CommandConstants.cardPriceDoubleRent,
   ),
 ];
 

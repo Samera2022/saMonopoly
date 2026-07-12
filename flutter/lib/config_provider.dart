@@ -1,14 +1,22 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
+
+import 'bridge_client.dart';
+import 'game_constants.dart';
+
 /// Client-side configuration provider for saMonopoly.
 ///
 /// Mirrors the Rust-side config types defined in
 /// `crates/domain/src/config.rs`.
 ///
 /// In standalone (simulation) mode, config is stored in local memory.
-/// When the native FFI bridge is connected, config commands are forwarded
-/// to the Rust engine for persistent file storage.
+/// When the native FFI bridge is connected via [client], config is loaded
+/// from and persisted to the Rust engine's FileConfigStore.
 class ConfigProvider {
+  /// Optional native bridge client for Rust engine persistence.
+  final BridgeClient? _client;
+
   // ── In-memory defaults (used when native bridge is unavailable) ──────────
 
   AppConfig _app = const AppConfig();
@@ -16,6 +24,14 @@ class ConfigProvider {
   AiConfig _ai = const AiConfig();
   NetworkConfig _network = const NetworkConfig();
   ContentConfig _content = const ContentConfig();
+
+  /// Create a [ConfigProvider] optionally backed by a [BridgeClient].
+  ///
+  /// When [client] is provided, the constructor immediately loads persisted
+  /// configuration from the Rust engine via [BridgeClient.configLoad].
+  ConfigProvider({BridgeClient? client}) : _client = client {
+    _loadFromEngine();
+  }
 
   // ── Accessors ────────────────────────────────────────────────────────────
 
@@ -52,12 +68,86 @@ class ConfigProvider {
     _persist('content', config.toJson());
   }
 
-  /// Persist a config section.  In simulation mode this is a no-op;
-  /// when the native bridge is connected, the section is forwarded to the
-  /// Rust engine which writes it to `config.sav`.
+  // ── Engine persistence ──────────────────────────────────────────────────
+
+  /// Load all sections from the Rust engine's FileConfigStore (if connected).
+  /// Falls back to in-memory defaults if the engine is unavailable or returns
+  /// invalid data.
+  void _loadFromEngine() {
+    final client = _client;
+    if (client == null) return;
+
+    final result = client.configLoad();
+    if (result == null) return;
+
+    try {
+      final decoded = jsonDecode(result) as Map<String, dynamic>;
+      // If the result contains an "ok": false field, it's an error response.
+      if (decoded['ok'] == false) {
+        debugPrint('Config load error: ${decoded['error']}');
+        return;
+      }
+      final sections = decoded['sections'] as Map<String, dynamic>?;
+      if (sections == null) return;
+
+      // Parse each known section if present.
+      if (sections['app'] != null) {
+        _app = AppConfig.fromJson(
+            sections['app'] as Map<String, dynamic>);
+      }
+      if (sections['game'] != null) {
+        _game = GameConfig.fromJson(
+            sections['game'] as Map<String, dynamic>);
+      }
+      if (sections['ai'] != null) {
+        _ai = AiConfig.fromJson(
+            sections['ai'] as Map<String, dynamic>);
+      }
+      if (sections['network'] != null) {
+        _network = NetworkConfig.fromJson(
+            sections['network'] as Map<String, dynamic>);
+      }
+      if (sections['content'] != null) {
+        _content = ContentConfig.fromJson(
+            sections['content'] as Map<String, dynamic>);
+      }
+
+      debugPrint('Config loaded from Rust engine');
+    } catch (e) {
+      debugPrint('Failed to parse config from engine: $e');
+    }
+  }
+
+  /// Persist a config section to the Rust engine's FileConfigStore.
+  ///
+  /// Loads the full current document from the engine, merges the updated
+  /// [section] with the new [value], and saves it back.  In standalone mode
+  /// (no bridge client) this is a no-op.
   void _persist(String section, Map<String, dynamic> value) {
-    // TODO: forward to native bridge when connected
-    // e.g.  NativeBridge.executeJson('{"ConfigSet":{"section":"$section","value":${jsonEncode(value)}}}');
+    final client = _client;
+    if (client == null) return;
+
+    // Load the existing config document from the engine so we merge,
+    // not overwrite, other sections.
+    String? existingJson = client.configLoad();
+    Map<String, dynamic> doc;
+    if (existingJson != null) {
+      try {
+        doc = jsonDecode(existingJson) as Map<String, dynamic>;
+      } catch (_) {
+        doc = {'version': 1, 'sections': <String, dynamic>{}};
+      }
+    } else {
+      doc = {'version': 1, 'sections': <String, dynamic>{}};
+    }
+
+    // Ensure sections map exists.
+    doc['sections'] ??= <String, dynamic>{};
+    (doc['sections'] as Map<String, dynamic>)[section] = value;
+
+    // Save the full document back.
+    final jsonStr = jsonEncode(doc);
+    client.configSave(jsonStr);
   }
 }
 
@@ -127,37 +217,37 @@ class GameConfig {
 
   const GameConfig({
     this.rulesetId = 'classic',
-    this.startingCash = 1500,
+    this.startingCash = CommandConstants.startingCash,
     this.maxPlayers = 4,
     this.stockMarketEnabled = true,
     this.lotteryEnabled = true,
-    this.passStartBonus = 200,
-    this.jailEscapeTurns = 3,
-    this.hospitalRecoveryTurns = 2,
+    this.passStartBonus = CommandConstants.passStartBonus,
+    this.jailEscapeTurns = GameDefaults.baseJailTurns,
+    this.hospitalRecoveryTurns = CommandConstants.hospitalRecoveryTurns,
     this.auctionEnabled = true,
     this.mortgageEnabled = true,
     this.tradeEnabled = true,
-    this.maxUpgradeLevel = 3,
+    this.maxUpgradeLevel = GameDefaults.maxUpgradeLevel,
     this.extensionUpgradeEnabled = true,
     this.groupRentEnabled = true,
   });
 
   factory GameConfig.fromJson(Map<String, dynamic> json) => GameConfig(
         rulesetId: json['ruleset_id'] as String? ?? 'classic',
-        startingCash: (json['starting_cash'] as num?)?.toInt() ?? 1500,
+        startingCash: (json['starting_cash'] as num?)?.toInt() ?? CommandConstants.startingCash,
         maxPlayers: (json['max_players'] as num?)?.toInt() ?? 4,
         stockMarketEnabled:
             json['stock_market_enabled'] as bool? ?? true,
         lotteryEnabled: json['lottery_enabled'] as bool? ?? true,
-        passStartBonus: (json['pass_start_bonus'] as num?)?.toInt() ?? 200,
+        passStartBonus: (json['pass_start_bonus'] as num?)?.toInt() ?? CommandConstants.passStartBonus,
         jailEscapeTurns:
-            (json['jail_escape_turns'] as num?)?.toInt() ?? 3,
+            (json['jail_escape_turns'] as num?)?.toInt() ?? GameDefaults.baseJailTurns,
         hospitalRecoveryTurns:
-            (json['hospital_recovery_turns'] as num?)?.toInt() ?? 2,
+            (json['hospital_recovery_turns'] as num?)?.toInt() ?? CommandConstants.hospitalRecoveryTurns,
         auctionEnabled: json['auction_enabled'] as bool? ?? true,
         mortgageEnabled: json['mortgage_enabled'] as bool? ?? true,
         tradeEnabled: json['trade_enabled'] as bool? ?? true,
-        maxUpgradeLevel: (json['max_upgrade_level'] as num?)?.toInt() ?? 3,
+        maxUpgradeLevel: (json['max_upgrade_level'] as num?)?.toInt() ?? GameDefaults.maxUpgradeLevel,
         extensionUpgradeEnabled:
             json['extension_upgrade_enabled'] as bool? ?? true,
         groupRentEnabled:

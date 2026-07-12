@@ -247,6 +247,7 @@ mod tests {
         let mut bus = EventBus::new();
         register_core_commands(&mut bus.command_handlers);
         register_core_tile_behaviors(&mut bus.tile_behaviors);
+        bus.subscribe(Box::new(sa_monopoly_application::subscribers::GameLogicHandler));
         let state = GameState {
             board: Board {
                 tiles: vec![
@@ -269,6 +270,7 @@ mod tests {
             decks: vec![], stock_market: None, active_auction: None,
             consecutive_doubles: 0, max_upgrade_level: 3, extension_upgrade_enabled: false,
             group_rent_enabled: false, lottery_state: None, bail_abuse_count: 0,
+            pending_events: vec![],
         };
         (bus, state)
     }

@@ -7,6 +7,7 @@ use tokio::sync::Mutex;
 
 use sa_monopoly_domain::GameState;
 use sa_monopoly_domain::event::AnyEvent as DomainAnyEvent;
+use sa_monopoly_domain::GameEvent;
 use crate::cancellable_event::CancellableEvent;
 use crate::command_handler::CommandHandlerRegistry;
 use crate::tile_behavior::TileBehaviorRegistry;
@@ -40,6 +41,15 @@ impl AnyEvent {
 
     pub fn source(&self) -> &str {
         &self.source
+    }
+}
+
+impl AnyEvent {
+    /// Deserialize the JSON payload into a typed event struct.
+    /// Works for events published via `publish_typed()` since those
+    /// embed the full struct data as JSON in `payload`.
+    pub fn into_typed<E: serde::de::DeserializeOwned>(self) -> Result<E, serde_json::Error> {
+        serde_json::from_value(self.payload)
     }
 }
 
@@ -97,7 +107,7 @@ pub trait EventSubscriber: Send + Sync {
     fn priority(&self) -> SubscriberPriority {
         SubscriberPriority::Last
     }
-    fn on_event(&mut self, event: &AnyEvent, state: &GameState) -> EventAction;
+    fn on_event(&mut self, event: &AnyEvent, state: &mut GameState) -> EventAction;
 }
 
 // ---------------------------------------------------------------------------
@@ -133,7 +143,7 @@ pub trait AsyncEventSubscriber: Send + Sync {
     fn priority(&self) -> SubscriberPriority {
         SubscriberPriority::Last
     }
-    async fn on_event(&mut self, event: &AnyEvent, state: &GameState) -> EventAction;
+    async fn on_event(&mut self, event: &AnyEvent, state: &mut GameState) -> EventAction;
 }
 
 // ---------------------------------------------------------------------------
@@ -456,6 +466,7 @@ impl EventBus {
         tile_id: &str,
         rng: &mut dyn RngService,
     ) {
+        log::info!("[TRACE] resolve_tile called: type='{tile_type}' id='{tile_id}'");
         // Use a raw pointer to split borrows: tile_behaviors (read-only)
         // and self (mutable for the bus parameter) are different fields.
         let behaviors_ptr: *const TileBehaviorRegistry = &self.tile_behaviors;
@@ -475,7 +486,7 @@ impl EventBus {
         event_type: &str,
         source: &str,
         payload: serde_json::Value,
-        state: &GameState,
+        state: &mut GameState,
     ) {
         let event = AnyEvent {
             event_type: event_type.to_string(),
@@ -487,7 +498,7 @@ impl EventBus {
     }
 
     /// Publish an error as a custom "core:error" event
-    pub fn publish_error(&mut self, reason: &str, state: &GameState) {
+    pub fn publish_error(&mut self, reason: &str, state: &mut GameState) {
         self.publish_custom(
             "core:error",
             "core",
@@ -496,14 +507,25 @@ impl EventBus {
         );
     }
 
+    /// Publish a typed event that implements GameEvent + Serialize.
+    /// The event is serialized to JSON and published as a custom event.
+    pub fn publish_typed<E: GameEvent + Serialize>(
+        &mut self,
+        event: &E,
+        state: &mut GameState,
+    ) {
+        let payload = serde_json::to_value(event).unwrap_or_default();
+        self.publish_custom(event.event_type(), event.source(), payload, state);
+    }
+
     /// Publish a pre-constructed AnyEvent
-    pub fn publish_any(&mut self, event: AnyEvent, state: &GameState) {
+    pub fn publish_any(&mut self, event: AnyEvent, state: &mut GameState) {
         self.publish_internal(event, state);
     }
 
     // ─── Internal dispatch ───
 
-    fn publish_internal(&mut self, event: AnyEvent, state: &GameState) {
+    fn publish_internal(&mut self, event: AnyEvent, state: &mut GameState) {
         // 1. Middleware chain
         let mut event = Some(event);
         for m in &mut self.middlewares {
@@ -529,7 +551,10 @@ impl EventBus {
             self.sorted = true;
         }
 
-        // 4. Dispatch to sync subscribers with interested_types filtering
+        // 4. Clone state for async subscribers before mutable borrow
+        let state_clone = state.clone();
+
+        // 5. Dispatch to sync subscribers with interested_types filtering
         //    Track modifications: each Modify chains onto the next subscriber,
         //    and the final modified event replaces the last entry in custom_events.
         let mut modified_event = event;
@@ -549,7 +574,7 @@ impl EventBus {
             }
         }
 
-        // 4b. If any subscriber modified the event, replace the last entry
+        // 5b. If any subscriber modified the event, replace the last entry
         //     in custom_events so the bridge sees the modified version.
         if was_modified {
             if let Some(last) = self.custom_events.last_mut() {
@@ -557,15 +582,45 @@ impl EventBus {
             }
         }
 
-        // 5. Dispatch to async subscribers (fire-and-forget) with the final event
+        // 6. Dispatch to async subscribers (fire-and-forget) with the final event
         for entry in &self.async_subscribers {
             let sub_arc = Arc::clone(&entry.subscriber);
             let event = modified_event.clone();
-            let state = state.clone();
+            let mut state = state_clone.clone();
             tokio::spawn(async move {
                 let mut guard = sub_arc.lock().await;
-                guard.on_event(&event, &state).await;
+                guard.on_event(&event, &mut state).await;
             });
+        }
+
+        // 7. Drain pending events queued by subscribers (e.g. GameLogicHandler)
+        //     and re-publish them through the normal event pipeline.
+        let pending = std::mem::take(&mut state.pending_events);
+        for pe in pending {
+            let event = AnyEvent {
+                event_type: pe.event_type,
+                source: pe.source,
+                payload: pe.payload,
+                timestamp: timestamp_now(),
+            };
+            // Bypass middleware and re-entrancy guard by calling publish_internal directly.
+            // This ensures pending events are also dispatched to subscribers.
+            self.custom_events.push(event.clone());
+            // Dispatch to sync subscribers only (avoid re-entrant async dispatch)
+            let mut modified = event;
+            for entry in &mut self.subscribers {
+                let types = entry.subscriber.interested_types();
+                if !types.is_empty() && !types.contains(&modified.event_type.as_str()) {
+                    continue;
+                }
+                match entry.subscriber.on_event(&modified, state) {
+                    EventAction::Continue => {}
+                    EventAction::Consume => break,
+                    EventAction::Modify(m) => {
+                        modified = m;
+                    }
+                }
+            }
         }
     }
 

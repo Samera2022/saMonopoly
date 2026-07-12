@@ -247,6 +247,7 @@ mod tests {
             extension_upgrade_enabled: false,
             group_rent_enabled: false,
             lottery_state: None,
+            pending_events: vec![],
         }
     }
 

@@ -13,7 +13,11 @@ pub struct BridgeRequest {
     pub command_type: String,
     pub source: String,
     pub payload: serde_json::Value,
-    pub state: GameState,
+    /// Game state as raw JSON value. Converted to GameState in execute().
+    /// Using serde_json::Value allows create_game to send an empty state
+    /// without triggering deserialization errors for missing required fields.
+    #[serde(default)]
+    pub state: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,7 +125,33 @@ impl EngineBridge {
     }
 
     pub fn execute(request: BridgeRequest, bus: &mut EventBus) -> BridgeResponse {
-        let mut state = request.state;
+        let mut state: GameState = serde_json::from_value(request.state.clone())
+            .unwrap_or_else(|_| GameState {
+                board: sa_monopoly_domain::Board {
+                    tiles: vec![],
+                    properties: vec![],
+                    graph: Default::default(),
+                    auto_link_rent: false,
+                },
+                players: vec![],
+                ruleset: sa_monopoly_domain::rules::RuleSetRef {
+                    id: String::new(),
+                    version: String::new(),
+                },
+                current_turn: 0,
+                active_player_index: 0,
+                seed: 0,
+                decks: vec![],
+                stock_market: None,
+                active_auction: None,
+                consecutive_doubles: 0,
+                max_upgrade_level: 3,
+                extension_upgrade_enabled: false,
+                group_rent_enabled: false,
+                lottery_state: None,
+                bail_abuse_count: 0,
+                pending_events: vec![],
+            });
         let mut rng = BridgeRng::new(state.seed);
 
         // Create command as AnyEvent::Custom using the command_type from the request.
@@ -161,7 +191,10 @@ impl EngineBridge {
     }
 
     pub fn execute_with_broadcast(request: BridgeRequest) -> BridgeResponse {
-        let response = Self::execute(request);
+        let mut bus = EventBus::new();
+        register_core_commands(&mut bus.command_handlers);
+        register_core_tile_behaviors(&mut bus.tile_behaviors);
+        let response = Self::execute(request, &mut bus);
         if let Some(broadcaster) = BROADCASTER.get() {
             broadcaster(&response);
         }
@@ -170,6 +203,12 @@ impl EngineBridge {
 
     pub fn execute_json(input: &str) -> Result<String, String> {
         let request: BridgeRequest = serde_json::from_str(input).map_err(|err| err.to_string())?;
+
+        // Special case: create_game constructs a GameState from map data directly.
+        if request.command_type == "core:command:create_game" {
+            return Self::handle_create_game(request);
+        }
+
         let mut bus = EventBus::new();
         // Register core command handlers and tile behaviors so the engine
         // can process commands like "core:command:roll", "core:command:buy_property", etc.
@@ -180,10 +219,33 @@ impl EngineBridge {
         // ★ TODO: Hot-plug injection of active external plugins.
         //   In the future this will call:
         //     PluginManager::global_active().register_into_bus(&mut bus);
-        //   For now, plugins_dir env var is reserved as an extension point:
-        //     if let Ok(plugin_state) = std::env::var("SA_MONOPOLY_PLUGINS_DIR") { … }
 
         let response = Self::execute(request, &mut bus);
+        serde_json::to_string_pretty(&response).map_err(|err| err.to_string())
+    }
+
+    /// Handle `core:command:create_game`: parse map JSON + players, construct GameState.
+    fn handle_create_game(request: BridgeRequest) -> Result<String, String> {
+        use crate::game_setup::map_json_to_game_state;
+
+        let map_value = request.payload.get("map")
+            .ok_or_else(|| "Missing 'map' field".to_string())?;
+        let players: Vec<sa_monopoly_domain::Player> =
+            serde_json::from_value(request.payload["players"].clone())
+                .map_err(|e| format!("Invalid players: {e}"))?;
+        let seed = request.payload["seed"].as_u64().unwrap_or(0);
+
+        let ruleset = sa_monopoly_domain::rules::RuleSetRef {
+            id: "classic".to_string(),
+            version: "1.0.0".to_string(),
+        };
+
+        let state = map_json_to_game_state(map_value, players, ruleset, seed);
+
+        let response = BridgeResponse {
+            events: vec![serde_json::json!({"event_type": "core:game_created", "map_id": map_value["id"]})],
+            state,
+        };
         serde_json::to_string_pretty(&response).map_err(|err| err.to_string())
     }
 
@@ -192,31 +254,28 @@ impl EngineBridge {
             command_type: "core:command:end_turn".to_string(),
             source: "core".to_string(),
             payload: serde_json::json!({}),
-            state: GameState {
-                board: sa_monopoly_domain::Board {
-                    tiles: vec![],
-                    properties: vec![],
-                    graph: Default::default(),
-                    auto_link_rent: false,
+            state: serde_json::json!({
+                "board": {
+                    "tiles": [],
+                    "properties": [],
+                    "graph": {"edges": [], "teleporters": []},
+                    "auto_link_rent": false
                 },
-                players: vec![],
-                ruleset: sa_monopoly_domain::rules::RuleSetRef {
-                    id: "classic".to_string(),
-                    version: "0.1.0".to_string(),
-                },
-                current_turn: 0,
-                active_player_index: 0,
-                seed: 1,
-                decks: vec![],
-                stock_market: None,
-                active_auction: None,
-                consecutive_doubles: 0,
-                max_upgrade_level: 3,
-                extension_upgrade_enabled: false,
-                group_rent_enabled: false,
-                lottery_state: None,
-                bail_abuse_count: 0,
-            },
+                "players": [],
+                "ruleset": {"id": "classic", "version": "0.1.0"},
+                "current_turn": 0,
+                "active_player_index": 0,
+                "seed": 1,
+                "decks": [],
+                "stock_market": null,
+                "active_auction": null,
+                "consecutive_doubles": 0,
+                "max_upgrade_level": 3,
+                "extension_upgrade_enabled": false,
+                "group_rent_enabled": false,
+                "lottery_state": null,
+                "bail_abuse_count": 0
+            }),
         }
     }
 }
@@ -273,12 +332,13 @@ mod tests {
         let events = parsed["events"].as_array().unwrap();
         assert!(!events.is_empty(), "Expected at least one event");
         
-        let first_event = &events[0];
-        println!("First event: {}", first_event);
+        // dice_roll_started is events[0]; dice_rolled (which contains dice1/dice2) is events[1]
+        let dice_event = &events[1];
+        println!("Dice event (events[1]): {}", dice_event);
         
         // Verify dice1 and dice2 are present and non-zero
-        let dice1 = first_event["dice1"].as_i64().unwrap_or(0);
-        let dice2 = first_event["dice2"].as_i64().unwrap_or(0);
+        let dice1 = dice_event["dice1"].as_i64().unwrap_or(0);
+        let dice2 = dice_event["dice2"].as_i64().unwrap_or(0);
         println!("dice1={}, dice2={}", dice1, dice2);
         
         assert!(dice1 >= 1 && dice1 <= 6, "dice1 should be 1-6, got {}", dice1);

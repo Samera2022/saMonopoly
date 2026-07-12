@@ -1,13 +1,14 @@
 use crate::event_bus::EventBus;
 use crate::builtin::commands::register_core_commands;
 use crate::builtin::tiles::register_core_tile_behaviors;
-use crate::subscribers::EventLogger;
+use crate::subscribers::{EventLogger, GameLogicHandler};
 use crate::example_plugins::{register_dice_stats, register_treasure_hunt};
 
 /// Register core subscribers including built-in subscribers and example plugins.
 pub fn register_core_subscribers(bus: &mut EventBus) {
     // Register built-in subscribers
     bus.subscribe(Box::new(EventLogger));
+    bus.subscribe(Box::new(GameLogicHandler));
 
     // ═══ 示例插件注册 ═══════════════════════════════════════════
     // DiceStats: 监听骰子事件并输出统计信息

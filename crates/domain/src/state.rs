@@ -8,6 +8,15 @@ use crate::player::Player;
 use crate::rules::RuleSetRef;
 use crate::types::Money;
 
+/// A simple pending event that subscribers can push onto GameState.
+/// The EventBus drains these after each subscriber dispatch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingEvent {
+    pub event_type: String,
+    pub source: String,
+    pub payload: serde_json::Value,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActiveAuction {
     pub tile_id: String,
@@ -40,6 +49,11 @@ pub struct GameState {
     /// How many times the active player has used bail to get out of jail.
     /// Each use adds +1 to the next jail term.
     pub bail_abuse_count: u32,
+
+    /// Pending events queued by subscribers during event processing.
+    /// The EventBus drains these after each dispatch cycle.
+    #[serde(default)]
+    pub pending_events: Vec<PendingEvent>,
 }
 
 impl GameState {
@@ -105,5 +119,21 @@ impl GameState {
             .collect();
         team_ids.retain(|tid| !self.team_bankrupt(tid));
         team_ids
+    }
+
+    /// Queue a custom event to be published after the current subscriber dispatch.
+    /// Subscribers (e.g. GameLogicHandler) use this when they need to emit events
+    /// but don't have access to the EventBus.
+    pub fn publish_custom_event(
+        &mut self,
+        event_type: &str,
+        source: &str,
+        payload: serde_json::Value,
+    ) {
+        self.pending_events.push(PendingEvent {
+            event_type: event_type.to_string(),
+            source: source.to_string(),
+            payload,
+        });
     }
 }
