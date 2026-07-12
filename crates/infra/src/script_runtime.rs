@@ -290,7 +290,7 @@ mod tests {
 
         let cash_before = state.players[0].cash;
         bus.execute_command(
-            serde_json::from_value(serde_json::json!({"Custom":{"event_type":"core:command:pay_rent","source":"core","payload":{"player_id":"player_1","tile_id":"prop_1"},"timestamp":0}})).unwrap(),
+            serde_json::from_value(serde_json::json!({"Custom":{"event_type":"core:command:pay_rent","source":"core","payload":{"player_id":"player_1","tile_id":"prop_1"},"timestamp":0,"category":"game"}})).unwrap(),
             &mut state, &mut crate::rng::XorShift64::new(42),
         );
 
@@ -314,7 +314,7 @@ mod tests {
         // 验证: roll 命令没有被 Lua 插件拒绝（events 中不应有 command_rejected）
         let events_before = bus.drain_custom_events().len();
         bus.execute_command(
-            serde_json::from_value(serde_json::json!({"Custom":{"event_type":"core:command:roll","source":"core","payload":{"player_id":"player_1"},"timestamp":0}})).unwrap(),
+            serde_json::from_value(serde_json::json!({"Custom":{"event_type":"core:command:roll","source":"core","payload":{"player_id":"player_1"},"timestamp":0,"category":"game"}})).unwrap(),
             &mut state, &mut crate::rng::XorShift64::new(5),
         );
         let events = bus.drain_custom_events();

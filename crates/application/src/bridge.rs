@@ -7,8 +7,6 @@ use crate::event_bus::EventBus;
 use crate::builtin::commands::register_core_commands;
 use crate::builtin::tiles::register_core_tile_behaviors;
 use crate::startup::register_core_subscribers;
-use crate::turn_processor::{TurnProcessor, AiDecisionMaker};
-use crate::ports::RngService;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BridgeRequest {
@@ -160,6 +158,7 @@ impl EngineBridge {
         // Flutter now sends namespaced names (e.g. "core:command:roll") directly,
         // so no mapping is needed.
         let command = AnyEvent::Custom {
+            category: "game".to_string(),
             event_type: request.command_type,
             source: request.source,
             payload: request.payload,
@@ -175,6 +174,7 @@ impl EngineBridge {
             .into_iter()
             .map(|e| {
                 let domain_event = sa_monopoly_domain::event::AnyEvent::Custom {
+                    category: "game".to_string(),
                     event_type: e.event_type,
                     source: e.source,
                     payload: e.payload,
@@ -212,6 +212,9 @@ impl EngineBridge {
         }
         if request.command_type == "core:command:process_ai_turn" {
             return Self::execute_ai_turn(request);
+        }
+        if request.command_type == "core:command:ai_evaluate" {
+            return Self::handle_ai_evaluate(request);
         }
 
         let mut bus = EventBus::new();
@@ -252,6 +255,7 @@ impl EngineBridge {
             .into_iter()
             .map(|e| Self::flatten_event(
                 &sa_monopoly_domain::event::AnyEvent::Custom {
+                    category: "game".to_string(),
                     event_type: e.event_type,
                     source: e.source,
                     payload: e.payload,
@@ -261,6 +265,65 @@ impl EngineBridge {
             .collect();
         let response = BridgeResponse { events, state };
         serde_json::to_string_pretty(&response).map_err(|err| err.to_string())
+    }
+
+    /// Handle `core:command:ai_evaluate`: use strategic AI to evaluate buy/upgrade decisions.
+    fn handle_ai_evaluate(request: BridgeRequest) -> Result<String, String> {
+        use crate::turn_processor::StrategicAiDecisionMaker;
+
+        let state: GameState = serde_json::from_value(request.state.clone())
+            .map_err(|e| format!("Invalid state: {e}"))?;
+
+        let action = request.payload["action"].as_str().unwrap_or("");
+        let player_id = request.payload["player_id"]
+            .as_str()
+            .or_else(|| state.active_player().map(|p| p.id.as_str()))
+            .unwrap_or("");
+
+        let result = match action {
+            "buy" => {
+                let tile_id = request.payload["tile_id"].as_str().unwrap_or("");
+                let decision = StrategicAiDecisionMaker::evaluate_buy(&state, tile_id, player_id);
+                let score = StrategicAiDecisionMaker::score_property(&state, tile_id, player_id);
+                serde_json::json!({
+                    "action": "buy",
+                    "decision": if decision { "buy" } else { "pass" },
+                    "score": score,
+                    "tile_id": tile_id,
+                })
+            }
+            "upgrade_target" => {
+                let best = StrategicAiDecisionMaker::best_upgrade_target(&state, player_id);
+                match best {
+                    Some((tile_id, score)) => serde_json::json!({
+                        "action": "upgrade",
+                        "target": tile_id,
+                        "score": score,
+                    }),
+                    None => serde_json::json!({
+                        "action": "upgrade",
+                        "target": null,
+                        "score": 0,
+                    }),
+                }
+            }
+            "score" => {
+                let tile_id = request.payload["tile_id"].as_str().unwrap_or("");
+                let score = StrategicAiDecisionMaker::score_property(&state, tile_id, player_id);
+                serde_json::json!({
+                    "action": "score",
+                    "tile_id": tile_id,
+                    "score": score,
+                })
+            }
+            _ => {
+                serde_json::json!({
+                    "error": format!("Unknown action '{}'. Supported: buy, upgrade_target, score", action),
+                })
+            }
+        };
+
+        serde_json::to_string_pretty(&result).map_err(|err| err.to_string())
     }
 
     /// Handle `core:command:create_game`: parse map JSON + players, construct GameState.

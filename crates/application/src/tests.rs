@@ -190,6 +190,7 @@ mod tests {
         // dice1=1, dice2=1, sum=2 → (0+2)%4 = 2 → card_shop_1 ✅
 
         let command = sa_monopoly_domain::event::AnyEvent::Custom {
+            category: "game".to_string(),
             event_type: "core:command:roll".into(),
             source: "core".into(),
             payload: serde_json::json!({"player_id": "player_0"}),

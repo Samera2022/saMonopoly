@@ -365,6 +365,7 @@ impl EventBus {
                     source: command.source().to_string(),
                     payload: modified_payload,
                     timestamp: sa_monopoly_domain::event::timestamp_now(),
+                    category: "game".to_string(),
                 }
             }
             PreEventAction::Continue => command,

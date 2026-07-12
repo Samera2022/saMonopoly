@@ -150,6 +150,26 @@ class BridgeCommand {
   /// All game logic runs on the Rust side; Flutter merely displays the events.
   factory BridgeCommand.processAiTurn() =>
       const BridgeCommand(type: 'core:command:process_ai_turn');
+
+  /// Evaluate an AI decision using the strategic engine (no state mutation).
+  ///
+  /// Supported actions:
+  /// - `buy`: decide whether to buy a property → `{decision: "buy"|"pass", score: N}`
+  /// - `upgrade_target`: find best property to upgrade → `{target: "tile_id"|null, score: N}`
+  /// - `score`: get a numerical score for a property → `{score: N}`
+  factory BridgeCommand.aiEvaluate({
+    required String action,
+    String? tileId,
+    String? playerId,
+  }) =>
+      BridgeCommand(
+        type: 'core:command:ai_evaluate',
+        params: {
+          'action': action,
+          if (tileId != null) 'tile_id': tileId,
+          if (playerId != null) 'player_id': playerId,
+        },
+      );
 }
 
 /// Bridge request – matches [crate::bridge::BridgeRequest] on the Rust side.
@@ -755,6 +775,53 @@ class BridgeClient {
       throw Exception('Rust engine response missing events/state fields');
     }
     return BridgeResponse.fromJson(decoded);
+  }
+
+  /// Call the strategic AI evaluation engine (no state mutation).
+  ///
+  /// Returns the raw JSON result from the Rust engine.
+  /// Example: `{action: "buy", decision: "buy", score: 75, tile_id: "prop_1"}`
+  Future<Map<String, dynamic>> evaluateAi({
+    required String action,
+    String? tileId,
+    String? playerId,
+    required Map<String, dynamic> currentState,
+  }) async {
+    if (!_engine.isAvailable) {
+      throw Exception('Rust engine not available');
+    }
+
+    // Auto-inject player_id from active player if not provided
+    var pid = playerId;
+    if (pid == null) {
+      final players = (currentState['players'] as List<dynamic>?) ?? [];
+      final idx = (currentState['active_player_index'] as num?)?.toInt() ?? 0;
+      if (idx < players.length) {
+        final player = players[idx] as Map<String, dynamic>;
+        pid = player['id'] as String?;
+      }
+    }
+
+    final cmd = BridgeCommand.aiEvaluate(
+      action: action,
+      tileId: tileId,
+      playerId: pid,
+    );
+    final request = BridgeRequest(command: cmd, state: currentState);
+    final jsonPayload = buildRequest(request);
+    final responseText = _engine.execute(jsonPayload);
+    if (responseText == null) {
+      throw Exception('Rust engine returned null');
+    }
+
+    final decoded = jsonDecode(responseText);
+    if (decoded is! Map<String, dynamic>) {
+      throw Exception('Rust engine returned non-map response');
+    }
+    if (decoded.containsKey('error')) {
+      throw Exception('Rust engine error: ${decoded['error']}');
+    }
+    return decoded;
   }
 
   // ── Map loading FFI proxy methods ──────────────────────────────────────────

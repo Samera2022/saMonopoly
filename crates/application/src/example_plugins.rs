@@ -327,7 +327,8 @@ mod tests {
                 "payload": {
                     "player_id": "player_1"
                 },
-                "timestamp": 0
+                "timestamp": 0,
+                "category": "game"
             }
         })).unwrap_or_else(|_| {
             // Fallback for test
@@ -430,7 +431,7 @@ mod hook_tests {
         let (mut bus, mut state) = make_test_state();
         bus.register_pre_hook(Box::new(BlockRollPlugin));
         bus.execute_command(
-            serde_json::from_value(serde_json::json!({"Custom":{"event_type":"core:command:roll","source":"core","payload":{"player_id":"player_1"},"timestamp":0}})).unwrap(),
+            serde_json::from_value(serde_json::json!({"Custom":{"event_type":"core:command:roll","source":"core","payload":{"player_id":"player_1"},"timestamp":0,"category":"game"}})).unwrap(),
             &mut state, &mut TestRng(5),
         );
         let events = bus.drain_custom_events();
@@ -448,7 +449,7 @@ mod hook_tests {
         let cash_p1 = state.players[0].cash;
         let cash_p2 = state.players[1].cash;
         bus.execute_command(
-            serde_json::from_value(serde_json::json!({"Custom":{"event_type":"core:command:pay_rent","source":"core","payload":{"player_id":"player_1","tile_id":"prop_1"},"timestamp":0}})).unwrap(),
+            serde_json::from_value(serde_json::json!({"Custom":{"event_type":"core:command:pay_rent","source":"core","payload":{"player_id":"player_1","tile_id":"prop_1"},"timestamp":0,"category":"game"}})).unwrap(),
             &mut state, &mut TestRng(5),
         );
         assert_eq!(state.players[0].cash, cash_p1);
@@ -463,7 +464,7 @@ mod hook_tests {
         let (mut bus, mut state) = make_test_state();
         bus.register_pre_hook(Box::new(DoubleRentPlugin));
         bus.execute_command(
-            serde_json::from_value(serde_json::json!({"Custom":{"event_type":"core:command:pay_rent","source":"core","payload":{"player_id":"player_1","tile_id":"prop_1"},"timestamp":0}})).unwrap(),
+            serde_json::from_value(serde_json::json!({"Custom":{"event_type":"core:command:pay_rent","source":"core","payload":{"player_id":"player_1","tile_id":"prop_1"},"timestamp":0,"category":"game"}})).unwrap(),
             &mut state, &mut TestRng(5),
         );
         let events = bus.drain_custom_events();
@@ -482,7 +483,7 @@ mod hook_tests {
         let (mut bus, mut state) = make_test_state();
         bus.register_post_hook(Box::new(PostCommandLogger::new()));
         bus.execute_command(
-            serde_json::from_value(serde_json::json!({"Custom":{"event_type":"core:command:pay_rent","source":"core","payload":{"player_id":"player_1","tile_id":"prop_1"},"timestamp":0}})).unwrap(),
+            serde_json::from_value(serde_json::json!({"Custom":{"event_type":"core:command:pay_rent","source":"core","payload":{"player_id":"player_1","tile_id":"prop_1"},"timestamp":0,"category":"game"}})).unwrap(),
             &mut state, &mut TestRng(5),
         );
         assert_eq!(state.players[0].cash, 990);

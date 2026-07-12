@@ -1,3 +1,4 @@
+pub mod ai_subscriber;
 pub mod bridge;
 pub mod cancellable_event;
 pub mod cards;

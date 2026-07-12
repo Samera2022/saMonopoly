@@ -17,7 +17,7 @@ import 'plugin_state.dart';
 // Data model for a player slot
 // ============================================================================
 
-enum PlayerSlotType { human, bot, empty }
+enum PlayerSlotType { human, ai, llm, empty }
 
 enum LobbyMode { offline, host, join }
 
@@ -42,6 +42,13 @@ class PlayerSlotData {
     this.teamColor,
     this.isReady = false,
   });
+
+  /// Whether this slot represents a computer-controlled player.
+  bool get isBot => type == PlayerSlotType.ai || type == PlayerSlotType.llm;
+  /// Whether this slot is a rule‑based AI.
+  bool get isAi => type == PlayerSlotType.ai;
+  /// Whether this slot is an LLM‑driven AI.
+  bool get isLlm => type == PlayerSlotType.llm;
 }
 
 // ============================================================================
@@ -430,7 +437,7 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
         .map((s) => {
               'player_id': s.id,
               'player_name': s.name,
-              'is_bot': s.type == PlayerSlotType.bot,
+              'is_bot': s.isBot,
               'is_ready': s.isReady,
               'slot_index': _slots.indexOf(s),
             })
@@ -512,7 +519,7 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
                     name: playerName,
                     color: _slotColors[slotIndex],
                     type: isBot
-                        ? PlayerSlotType.bot
+                        ? PlayerSlotType.ai
                         : PlayerSlotType.human,
                     teamColor: null,
                     isReady: isReady,
@@ -549,8 +556,12 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
               .toList();
           final aiFlags = _slots
               .where((s) => s.type != PlayerSlotType.empty)
-              .map((s) => s.type == PlayerSlotType.bot)
+              .map((s) => s.isBot)
               .toList();
+    final llmFlags = _slots
+        .where((s) => s.type != PlayerSlotType.empty)
+        .map((s) => s.isLlm)
+        .toList();
           final teamIds = _slots
               .where((s) => s.type != PlayerSlotType.empty)
               .map((s) => s.teamColor != null ? 'team_${_teamColors.indexOf(s.teamColor!)}' : null)
@@ -562,6 +573,7 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
                 initialPlayerCount: count,
                 playerNames: names,
                 aiFlags: aiFlags,
+                llmFlags: llmFlags,
                 teamIds: teamIds,
                 mapId: widget.mapId,
                 initialState: initialState,
@@ -715,7 +727,11 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
         .toList();
     final aiFlags = _slots
         .where((s) => s.type != PlayerSlotType.empty)
-        .map((s) => s.type == PlayerSlotType.bot)
+        .map((s) => s.isBot)
+        .toList();
+    final llmFlags = _slots
+        .where((s) => s.type != PlayerSlotType.empty)
+        .map((s) => s.isLlm)
         .toList();
     final teamIds = _slots
         .where((s) => s.type != PlayerSlotType.empty)
@@ -756,6 +772,7 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
                 initialPlayerCount: count,
                 playerNames: names,
                 aiFlags: aiFlags,
+                llmFlags: llmFlags,
                 teamIds: teamIds,
                 mapId: widget.mapId,
                 initialState: initialState,
@@ -791,12 +808,12 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
           _slots.indexWhere((s) => s.type == PlayerSlotType.empty);
       if (emptyIdx >= 0) {
         final botIndex =
-            _slots.where((s) => s.type == PlayerSlotType.bot).length + 1;
+            _slots.where((s) => s.isBot).length + 1;
         _slots[emptyIdx] = PlayerSlotData(
           id: 'player_$emptyIdx',
           name: '电脑玩家 $botIndex',
           color: _slotColors[emptyIdx],
-          type: PlayerSlotType.bot,
+          type: PlayerSlotType.ai,
           teamColor: null,
           isReady: false,
         );
@@ -850,7 +867,7 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
   void _onSlotLongPress(int index) {
     final slot = _slots[index];
     if (slot.type == PlayerSlotType.human ||
-        slot.type == PlayerSlotType.bot) {
+        slot.type == PlayerSlotType.ai) {
       showModalBottomSheet(
         context: context,
         backgroundColor: const Color(0xFF1A1A2E),
@@ -882,6 +899,37 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
                     _showRenameDialog(index);
                   },
                 ),
+                // ── Player type selector (local slots only) ──────
+                if (_isLocalSlot(index))
+                  ListTile(
+                    leading: Icon(_playerTypeIcon(slot.type),
+                        color: _playerTypeColor(slot.type)),
+                    title: Text(
+                        '类型: ${_playerTypeLabel(slot.type)}',
+                        style: const TextStyle(color: Colors.white)),
+                    trailing: DropdownButton<PlayerSlotType>(
+                      value: slot.type,
+                      dropdownColor: const Color(0xFF1A1A2E),
+                      style: const TextStyle(color: Colors.white),
+                      underline: const SizedBox.shrink(),
+                      items: const [
+                        DropdownMenuItem(
+                            value: PlayerSlotType.human,
+                            child: Text('本地玩家')),
+                        DropdownMenuItem(
+                            value: PlayerSlotType.ai,
+                            child: Text('规则 AI')),
+                        DropdownMenuItem(
+                            value: PlayerSlotType.llm,
+                            child: Text('LLM 玩家')),
+                      ],
+                      onChanged: (v) {
+                        if (v == null) return;
+                        Navigator.of(ctx).pop();
+                        _setPlayerType(index, v);
+                      },
+                    ),
+                  ),
                 ListTile(
                   leading: Icon(Icons.remove_circle_outline,
                       color: Colors.red.shade300),
@@ -953,6 +1001,33 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
     );
   }
 
+  /// Handle reorder after a drag-and-drop operation on the player roster.
+  /// Assigns sequential names ("玩家 1", "玩家 2", …) and preserves colours.
+  void _onReorderSlots(int oldIndex, int newIndex) {
+    setState(() {
+      if (newIndex > oldIndex) newIndex--;
+      final item = _slots.removeAt(oldIndex);
+      _slots.insert(newIndex, item);
+      // Auto‑rename filled slots sequentially
+      for (int i = 0; i < _slots.length; i++) {
+        if (_slots[i].type != PlayerSlotType.empty) {
+          _slots[i] = PlayerSlotData(
+            id: 'player_$i',
+            name: '玩家 ${i + 1}',
+            color: _slots[i].color,   // preserve original colour
+            type: _slots[i].type,
+            teamColor: _slots[i].teamColor,
+            isReady: _slots[i].isReady,
+          );
+        }
+      }
+      _systemMessages.insert(0, '已调整玩家顺序');
+      if (_isHosting && _networkService != null) {
+        _broadcastRoster();
+      }
+    });
+  }
+
   void _removeSlot(int index) {
     setState(() {
       final name = _slots[index].name;
@@ -971,6 +1046,60 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
           'type': 'player_removed',
           'player_id': 'player_$index',
         });
+        _broadcastRoster();
+      }
+    });
+  }
+
+  /// Whether the slot at [index] is a local (non‑network) slot.
+  bool _isLocalSlot(int index) {
+    final slot = _slots[index];
+    return _lobbyMode != LobbyMode.join && slot.id.startsWith('player_');
+  }
+
+  /// Icon for the given player type.
+  IconData _playerTypeIcon(PlayerSlotType t) {
+    switch (t) {
+      case PlayerSlotType.human: return Icons.person_rounded;
+      case PlayerSlotType.ai: return Icons.computer_rounded;
+      case PlayerSlotType.llm: return Icons.psychology_rounded;
+      case PlayerSlotType.empty: return Icons.person_add_alt_1_rounded;
+    }
+  }
+
+  /// Colour for the given player type.
+  Color _playerTypeColor(PlayerSlotType t) {
+    switch (t) {
+      case PlayerSlotType.human: return const Color(0xFF43A047);
+      case PlayerSlotType.ai: return const Color(0xFF1E88E5);
+      case PlayerSlotType.llm: return const Color(0xFF9C27B0);
+      case PlayerSlotType.empty: return Colors.grey;
+    }
+  }
+
+  /// Display label for the given player type.
+  String _playerTypeLabel(PlayerSlotType t) {
+    switch (t) {
+      case PlayerSlotType.human: return '本地玩家';
+      case PlayerSlotType.ai: return '规则 AI';
+      case PlayerSlotType.llm: return 'LLM 玩家';
+      case PlayerSlotType.empty: return '空位';
+    }
+  }
+
+  /// Change the type of the player at [index] (preserves colour).
+  void _setPlayerType(int index, PlayerSlotType type) {
+    setState(() {
+      _slots[index] = PlayerSlotData(
+        id: _slots[index].id,
+        name: _slots[index].name,
+        color: _slots[index].color,  // ← preserve existing colour
+        type: type,
+        teamColor: _slots[index].teamColor,
+        isReady: false,
+      );
+      _systemMessages.insert(0, '${_slots[index].name} 类型: ${_playerTypeLabel(type)}');
+      if (_isHosting && _networkService != null) {
         _broadcastRoster();
       }
     });
@@ -1547,13 +1676,21 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
         ),
         const SizedBox(height: 12),
 
-        // Player slot cards
-        ...List.generate(_slots.length, (i) {
-          return Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: _buildPlayerSlotCard(i),
-          );
-        }),
+        // Player slot cards — draggable to reorder
+        Flexible(
+          child: ReorderableListView(
+            shrinkWrap: true,
+            buildDefaultDragHandles: false,
+            onReorder: _onReorderSlots,
+            children: List.generate(_slots.length, (i) {
+              return Padding(
+                key: ValueKey('slot_$i'),
+                padding: const EdgeInsets.only(bottom: 8),
+                child: _buildPlayerSlotCard(i),
+              );
+            }),
+          ),
+        ),
 
         // Add bot button — only in offline or host mode
         if (_lobbyMode != LobbyMode.join && _activePlayerCount < 4) ...[
@@ -1581,10 +1718,15 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
         badgeColor = const Color(0xFF43A047);
         badgeIcon = Icons.person_rounded;
         break;
-      case PlayerSlotType.bot:
+      case PlayerSlotType.ai:
         badgeLabel = 'CPU';
         badgeColor = const Color(0xFF1E88E5);
         badgeIcon = Icons.computer_rounded;
+        break;
+      case PlayerSlotType.llm:
+        badgeLabel = 'LLM';
+        badgeColor = const Color(0xFF9C27B0);
+        badgeIcon = Icons.psychology_rounded;
         break;
       case PlayerSlotType.empty:
         badgeLabel = '空位';
@@ -1593,7 +1735,10 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
         break;
     }
 
-    return GestureDetector(
+    return ReorderableDragStartListener(
+      index: index,
+      enabled: !isEmpty,
+      child: GestureDetector(
       onTap: () => _onSlotTap(index),
       onLongPress: () => _onSlotLongPress(index),
       child: IntrinsicHeight(
@@ -1810,6 +1955,7 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
             ],
           ),
         ),
+      ),
       ),
     );
   }

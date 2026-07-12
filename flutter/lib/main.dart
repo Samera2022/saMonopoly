@@ -191,6 +191,8 @@ class GameScreen extends StatefulWidget {
   final int? initialPlayerCount;
   final List<String>? playerNames;
   final List<bool>? aiFlags;
+  /// LLM-controlled flag for each player (true = LLM-driven).
+  final List<bool>? llmFlags;
   /// Team ID for each player (null = no team). Indexed as 'team_0'..'team_3'.
   final List<String?>? teamIds;
   /// Map ID from the map selection screen. When 'classic', uses the 40-tile
@@ -208,6 +210,7 @@ class GameScreen extends StatefulWidget {
     this.initialPlayerCount,
     this.playerNames,
     this.aiFlags,
+    this.llmFlags,
     this.teamIds,
     this.mapId,
     this.initialState,
@@ -884,8 +887,10 @@ class _GameScreenState extends State<GameScreen> {
           'position': 'start',
           'is_ai': widget.aiFlags != null && i < widget.aiFlags!.length
               ? widget.aiFlags![i]
-              : i > 0,
-          'is_llm_controlled': false,
+              : false,
+          'is_llm_controlled': widget.llmFlags != null && i < widget.llmFlags!.length
+              ? widget.llmFlags![i]
+              : false,
           'jail_turns': 0,
           'hospital_turns': 0,
           'owned_cards': <String>[],
@@ -914,6 +919,10 @@ class _GameScreenState extends State<GameScreen> {
         });
       }
       _addLog('Game started with ${_gameState.numPlayers} players');
+      // If the first player is AI, kick off their turn automatically
+      if (_isActivePlayerAi && mounted) {
+        await _processAiTurn();
+      }
     } catch (e) {
       _addLog('Rust init failed: $e');
       if (mounted) setState(() {});
@@ -963,6 +972,10 @@ class _GameScreenState extends State<GameScreen> {
         _landedTileIdThisTurn = null;
       });
       _addLog('Game restarted with $count players');
+      // If the first player is AI, kick off their turn
+      if (_isActivePlayerAi && mounted) {
+        await _processAiTurn();
+      }
     } catch (e) {
       _addLog('Restart failed: $e');
       if (mounted) setState(() {});
@@ -1457,6 +1470,20 @@ class _GameScreenState extends State<GameScreen> {
   Future<void> _processAiTurn() async {
     if (!_isActivePlayerAi || !mounted) return;
 
+    // ── IMPORTANT: Save the AI player's ID BEFORE processing the turn ──
+    // process_ai_turn advances active_player_index to the next player.
+    // If we rely on auto-injection of player_id after the turn, we'll
+    // get the NEXT player's ID instead of the current AI's ID.
+    String? aiPlayerId;
+    String? aiPlayerPosBefore;
+    final playersBefore = (_currentState['players'] as List<dynamic>?) ?? [];
+    final idxBefore = (_currentState['active_player_index'] as num?)?.toInt() ?? 0;
+    if (idxBefore < playersBefore.length) {
+      final p = playersBefore[idxBefore] as Map<String, dynamic>?;
+      aiPlayerId = p?['id'] as String?;
+      aiPlayerPosBefore = p?['position'] as String?;
+    }
+
     final response = await _bridgeClient.executeCommand(
       command: BridgeCommand.processAiTurn(),
       currentState: _currentState,
@@ -1556,13 +1583,91 @@ class _GameScreenState extends State<GameScreen> {
       await Future.delayed(const Duration(milliseconds: 300));
     }
 
-    // Display logs and execute deferred UI actions (dialogues etc.)
+    // Display logs
     for (final log in dispatchResult.logs) {
       _addLog(log);
     }
-    for (final uiAction in dispatchResult.pendingUiActions) {
-      uiAction.execute();
+    // ⚠️  Do NOT execute pending UI actions (lottery, card shop dialogs) for AI
+    //     players.  The Rust AiSubscriber has already handled these decisions
+    //     internally (buying cards, lottery tickets, paying bail, etc.).
+    //     Showing the dialog for the next human player is unwanted.
+    // for (final uiAction in dispatchResult.pendingUiActions) {
+    //   uiAction.execute();
+    // }
+
+    // ═══ AI: strategic buy/upgrade after movement animation ═════
+    // The Rust TurnProcessor does NOT buy properties during the turn.
+    // We consult the strategic AI engine (core:command:ai_evaluate)
+    // in Rust, then execute the recommended actions here.
+    try {
+      // Use the AI player's ID saved BEFORE the turn was processed.
+      // We can't rely on _gameState.activePlayerIndex or _currentState
+      // because process_ai_turn advanced the turn to the next player.
+      final pos = aiPlayerPosBefore ?? '';
+
+      if (pos.isNotEmpty) {
+        // ── Step 1: Evaluate whether to buy the landed property ──
+        final buyEval = await _bridgeClient.evaluateAi(
+          action: 'buy',
+          tileId: pos,
+          playerId: aiPlayerId,
+          currentState: _currentState,
+        );
+
+        if (buyEval['decision'] == 'buy') {
+          // Pass player_id explicitly — auto-injection would use the
+          // advanced active_player_index and buy for the wrong player.
+          final buyResp = await _bridgeClient.executeCommand(
+            command: BridgeCommand(
+              type: 'core:command:buy_property',
+              params: {'tile_id': pos, 'player_id': aiPlayerId},
+            ),
+            currentState: _currentState,
+          );
+          final buyResult = EventDispatcher.dispatch(response: buyResp);
+          for (final log in buyResult.logs) { _addLog(log); }
+          setState(() {
+            _currentState = buyResp.state;
+            _gameState = _buildGameState(
+              buyResp.state,
+              lastEvent: buyResult.lastLog,
+            );
+          });
+        } else {
+          // Log the strategic decision to skip
+          final score = buyEval['score'] as num? ?? 0;
+          _addLog('[AI] Skipped property (score: $score) — strategic pass');
+        }
+
+        // ── Step 2: Evaluate upgrade target ─────────────────────
+        // After potentially buying, check if any property should be upgraded.
+        final upgradeEval = await _bridgeClient.evaluateAi(
+          action: 'upgrade_target',
+          currentState: _currentState,
+        );
+
+        final target = upgradeEval['target'] as String?;
+        if (target != null && target.isNotEmpty) {
+          final upgradeResp = await _bridgeClient.executeCommand(
+            command: BridgeCommand.upgradeProperty(target),
+            currentState: _currentState,
+          );
+          final upgradeResult = EventDispatcher.dispatch(response: upgradeResp);
+          for (final log in upgradeResult.logs) { _addLog(log); }
+          setState(() {
+            _currentState = upgradeResp.state;
+            _gameState = _buildGameState(
+              upgradeResp.state,
+              lastEvent: upgradeResult.lastLog,
+            );
+          });
+        }
+      }
+    } catch (e) {
+      debugPrint('[AI] Strategic evaluation error: $e');
+      // Fall back: state unchanged, continue
     }
+    // ═════════════════════════════════════════════════════════════
 
     _isAnimating = false;
     setState(() {});
