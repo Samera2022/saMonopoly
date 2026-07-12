@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'game_lobby_screen.dart';
 import 'map_models.dart';
-import 'map_repository.dart';
+import 'map_repository.dart' show DiscoveredMap, MapRepository, MapSource;
 
 // ============================================================================
 // Map Selection Screen – 3D card stacking with real map data
@@ -67,6 +67,9 @@ class _MapSelectionScreenState extends State<MapSelectionScreen>
   }
 
   List<MapMeta> get _maps => _repository.maps;
+
+  /// All entries with source info.
+  List<DiscoveredMap> get _entries => _repository.entries;
 
   @override
   Widget build(BuildContext context) {
@@ -300,7 +303,9 @@ class _MapSelectionScreenState extends State<MapSelectionScreen>
 
   /// Build a single map card with 3D stacking transform.
   Widget _buildMapCard(int index) {
-    final map = _maps[index];
+    final entry = _entries[index];
+    final map = entry.meta;
+    final source = entry.source;
     final page = _pageController.hasClients ? _pageController.page ?? 0 : 0.0;
     final pageOffset = page - index;
     // Scale: center = 1.0, sides = 0.80
@@ -331,7 +336,7 @@ class _MapSelectionScreenState extends State<MapSelectionScreen>
             ..rotateY(rotateY)
             ..translate(0.0, translateY)
             ..scale(scale),
-          child: _MapCardContent(map: map, isActive: index == _currentPage),
+          child: _MapCardContent(map: map, isActive: index == _currentPage, source: source),
         ),
       ),
     );
@@ -454,8 +459,13 @@ class _MapSelectionScreenState extends State<MapSelectionScreen>
 class _MapCardContent extends StatelessWidget {
   final MapMeta map;
   final bool isActive;
+  final MapSource source;
 
-  const _MapCardContent({required this.map, required this.isActive});
+  const _MapCardContent({
+    required this.map,
+    required this.isActive,
+    required this.source,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -508,6 +518,42 @@ class _MapCardContent extends StatelessWidget {
                             Colors.black.withOpacity(0.40),
                           ],
                         ),
+                      ),
+                    ),
+                  ),
+
+                  // ── Source badge (top-left) ───────────────────────
+                  Positioned(
+                    top: 8,
+                    left: 8,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: source == MapSource.builtin
+                            ? const Color(0xFF43A047).withOpacity(0.85)
+                            : const Color(0xFF1E88E5).withOpacity(0.85),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            source == MapSource.builtin
+                                ? Icons.inventory_2_rounded
+                                : Icons.folder_open_rounded,
+                            size: 11,
+                            color: Colors.white,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            source == MapSource.builtin ? '内置' : '外置',
+                            style: const TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ),

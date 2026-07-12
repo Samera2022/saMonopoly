@@ -2,6 +2,8 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import 'game_constants.dart';
+
 // ============================================================================
 // View models
 // ============================================================================
@@ -26,28 +28,38 @@ class BoardTileViewModel {
     );
   }
 
-  /// Return a colour associated with the tile kind for visual distinction.
+  /// Strip "core:" prefix and map to a colour for visual distinction.
   Color get color {
-    switch (kind) {
-      case 'Start':
+    // Normalize: strip "core:" prefix, convert to PascalCase
+    final normalized = kind.startsWith('core:')
+        ? kind.substring(5) // strip "core:" → "ordinary_property"
+        : kind;
+    // Convert snake_case to PascalCase: "ordinary_property" → "OrdinaryProperty"
+    final pascal = normalized
+        .split('_')
+        .map((s) => s.isNotEmpty ? '${s[0].toUpperCase()}${s.substring(1)}' : '')
+        .join();
+
+    switch (pascal) {
+      case TileKindNames.start:
         return Colors.green;
-      case 'OrdinaryProperty':
+      case TileKindNames.ordinaryProperty:
         return Colors.blue;
-      case 'SpecialProperty':
+      case TileKindNames.specialProperty:
         return Colors.purple;
-      case 'ExtensionProperty':
+      case TileKindNames.extensionProperty:
         return Colors.teal;
-      case 'Chance':
+      case TileKindNames.chance:
         return Colors.orange;
-      case 'CardShop':
+      case TileKindNames.cardShop:
         return Colors.amber;
-      case 'Lottery':
+      case TileKindNames.lottery:
         return Colors.red;
-      case 'Bank':
+      case TileKindNames.bank:
         return Colors.brown;
-      case 'Jail':
+      case TileKindNames.jail:
         return Colors.grey;
-      case 'Hospital':
+      case TileKindNames.hospital:
         return Colors.pink;
       default:
         return Colors.grey.shade300;
@@ -291,9 +303,7 @@ class BoardWidget extends StatelessWidget {
               // When owned, the top strip shows the owner's colour so both
               // coloured bars always match – avoiding ambiguity when a tile's
               // kind colour happens to overlap with a player's colour.
-              if (tile.kind == 'OrdinaryProperty' ||
-                  tile.kind == 'SpecialProperty' ||
-                  tile.kind == 'ExtensionProperty')
+              if (isOwnablePropertyKind(tile.kind))
                 Container(
                   height: 3,
                   color: ownerColor ?? tile.color,
@@ -310,10 +320,7 @@ class BoardWidget extends StatelessWidget {
                       // independent visual indicator so ownership is always
                       // clear even when the tile kind colour matches the
                       // player's colour.
-                      if (ownerColor != null &&
-                          (tile.kind == 'OrdinaryProperty' ||
-                           tile.kind == 'SpecialProperty' ||
-                           tile.kind == 'ExtensionProperty'))
+                      if (ownerColor != null && isOwnablePropertyKind(tile.kind))
                         Padding(
                           padding: const EdgeInsets.only(right: 2),
                           child: Icon(
@@ -340,10 +347,7 @@ class BoardWidget extends StatelessWidget {
                 ),
               ),
               // Ownership indicator bar at bottom of tile content.
-              if (ownerColor != null &&
-                  (tile.kind == 'OrdinaryProperty' ||
-                   tile.kind == 'SpecialProperty' ||
-                   tile.kind == 'ExtensionProperty'))
+              if (ownerColor != null && isOwnablePropertyKind(tile.kind))
                 Container(
                   height: 4,
                   color: ownerColor,

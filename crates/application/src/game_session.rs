@@ -24,6 +24,7 @@ impl GameSession {
                 group_rent_enabled: false,
                 lottery_state: None,
                 bail_abuse_count: 0,
+                pending_events: vec![],
             },
         }
     }

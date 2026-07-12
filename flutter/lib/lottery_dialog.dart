@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 
+import 'game_constants.dart';
+
 /// Dialog shown when a player lands on a Lottery tile.
-/// Shows the current jackpot, ticket price, and a grid of 50 numbered buttons.
+/// Shows the current jackpot, ticket price, and a grid of numbered buttons.
 class LotteryPickerDialog extends StatelessWidget {
   final int jackpot;
   final int ticketPrice;
@@ -78,9 +80,9 @@ class LotteryPickerDialog extends StatelessWidget {
                 ),
               )
             else ...[
-              const Text(
-                'Pick a number (1-50):',
-                style: TextStyle(fontWeight: FontWeight.bold),
+              Text(
+                'Pick a number (1-${LotteryConstants.pickRange}):',
+                style: const TextStyle(fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 8),
               GridView.builder(
@@ -92,7 +94,7 @@ class LotteryPickerDialog extends StatelessWidget {
                   crossAxisSpacing: 2,
                   mainAxisSpacing: 2,
                 ),
-                itemCount: 50,
+                itemCount: LotteryConstants.pickRange,
                 itemBuilder: (context, index) {
                   final number = index + 1;
                   return SizedBox(

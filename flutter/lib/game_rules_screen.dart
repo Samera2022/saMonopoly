@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'game_constants.dart';
+
 import 'config_provider.dart' show ConfigProvider, GameConfig;
 import 'main.dart' show GameScreen;
 
@@ -86,12 +88,12 @@ class _GameRulesScreenState extends State<GameRulesScreen> {
 
   void _saveConfig() {
     _configProvider.updateGame(GameConfig(
-      startingCash: int.tryParse(_startCashCtrl.text) ?? 1500,
+      startingCash: int.tryParse(_startCashCtrl.text) ?? CommandConstants.startingCash,
       maxPlayers: widget.players.length,
-      passStartBonus: int.tryParse(_passBonusCtrl.text) ?? 200,
-      jailEscapeTurns: int.tryParse(_jailTurnsCtrl.text) ?? 3,
-      hospitalRecoveryTurns: int.tryParse(_hospitalTurnsCtrl.text) ?? 2,
-      maxUpgradeLevel: int.tryParse(_maxUpgradeCtrl.text) ?? 3,
+      passStartBonus: int.tryParse(_passBonusCtrl.text) ?? CommandConstants.passStartBonus,
+      jailEscapeTurns: int.tryParse(_jailTurnsCtrl.text) ?? GameDefaults.baseJailTurns,
+      hospitalRecoveryTurns: int.tryParse(_hospitalTurnsCtrl.text) ?? CommandConstants.hospitalRecoveryTurns,
+      maxUpgradeLevel: int.tryParse(_maxUpgradeCtrl.text) ?? GameDefaults.maxUpgradeLevel,
       extensionUpgradeEnabled: _extensionUpgradeEnabled,
       groupRentEnabled: _groupRentEnabled,
       stockMarketEnabled: _stockMarketEnabled,

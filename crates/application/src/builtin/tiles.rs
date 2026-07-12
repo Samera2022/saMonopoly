@@ -1,3 +1,10 @@
+use sa_monopoly_domain::events::core_events::{
+    BankBonus, ChanceCardDrawn, FreeParkingBonus, IncomeTaxPaid, LandedOnSpecialProperty,
+    LuxuryTaxPaid, PlayerLeftHospitalEvent, PlayerLeftJailEvent, PlayerSentToJailEvent,
+    PlayerVisitedHospital, PlayerVisitedJail,
+};
+use sa_monopoly_domain::events::event_data::PropertyData;
+use sa_monopoly_domain::property::{PropertyKind, SpecialPropertyKind};
 use sa_monopoly_domain::tile::tile_types;
 use sa_monopoly_domain::GameState;
 
@@ -97,17 +104,6 @@ fn handle_ordinary_property(
         }
     };
 
-    // Publish landed-on-tile event
-    bus.publish_custom(
-        "core:player_moved",
-        "core",
-        serde_json::json!({
-            "player_id": player_id.clone(),
-            "to_tile": tile_id,
-        }),
-        state,
-    );
-
     if let Some(ref owner) = property.owner {
         // Property is owned
         if owner == &player_id {
@@ -194,58 +190,45 @@ fn handle_chance(
     _rng: &mut dyn RngService,
     bus: &mut EventBus,
 ) {
+    log::info!("[TRACE] handle_chance entered for tile_id='{tile_id}'");
     let active_idx = state.active_player_index;
     let player_id = match state.players.get(active_idx) {
         Some(p) => p.id.clone(),
         None => return,
     };
 
-    // Publish landed-on-tile event
-    bus.publish_custom(
-        "core:player_moved",
-        "core",
-        serde_json::json!({
-            "player_id": player_id.clone(),
-            "to_tile": tile_id,
-        }),
-        state,
-    );
-
-    // Try to draw a card from the first deck that has cards
-    if let Some(deck) = state.decks.first_mut() {
-        if let Some(card) = deck.draw() {
-            // Add the card to the player's inventory
-            if let Some(player) = state.players.get_mut(active_idx) {
-                player.owned_cards.push(card.id.clone());
-            }
-            bus.publish_custom(
-                "core:card_drawn",
-                "core",
-                serde_json::json!({
-                    "player_id": player_id.clone(),
-                    "card_id": card.id,
-                    "deck_id": deck.id,
-                    "effect_key": card.effect_key,
-                }),
-                state,
-            );
-        } else {
-            // No cards left in deck
-            bus.publish_custom(
-                "core:command_accepted",
-                "core",
-                serde_json::json!({ "name": format!("chance_empty:{tile_id}") }),
-                state,
-            );
-        }
-    } else {
-        // No decks available
+    // Try to draw a card from the first deck that has cards.
+    // Extract deck_id first to avoid borrowing conflicts with bus.publish_*.
+    log::info!("[TRACE] handle_chance: decks count={}", state.decks.len());
+    let drawn = {
+        let deck = state.decks.first_mut();
+        deck.map(|d| {
+            let deck_id = d.id.clone();
+            d.draw().map(|card| (deck_id, card.id.clone(), card.effect_key.clone()))
+        }).flatten()
+    };
+    if let Some((deck_id, card_id, effect_key)) = drawn {
+        log::info!("[TRACE] handle_chance: drew card='{card_id}' from deck='{deck_id}'");
+        // Publish typed event — GameLogicHandler handles adding to inventory
+        bus.publish_typed(&ChanceCardDrawn {
+            player_id: player_id.clone(),
+            card_id: card_id.clone(),
+            effect_key: effect_key.clone(),
+        }, state);
+        // Keep legacy custom event for backward compatibility
         bus.publish_custom(
-            "core:command_accepted",
+            "core:card_drawn",
             "core",
-            serde_json::json!({ "name": format!("chance_no_decks:{tile_id}") }),
+            serde_json::json!({
+                "player_id": player_id.clone(),
+                "card_id": card_id,
+                "deck_id": deck_id,
+                "effect_key": effect_key,
+            }),
             state,
         );
+    } else {
+        log::info!("[TRACE] handle_chance: no card drawn (empty deck or no decks)");
     }
 }
 
@@ -262,40 +245,300 @@ fn handle_jail(
         None => return,
     };
 
-    // Publish landed-on-tile event
+    // Publish typed event — GameLogicHandler handles turn decrement / release logic
+    bus.publish_typed(&PlayerVisitedJail {
+        player_id: player_id.clone(),
+    }, state);
+
+    if let Some(player) = state.players.get(active_idx) {
+        if player.is_in_jail() && player.jail_turns == 1 {
+            // After this visit, jail_turns would reach 0 — publish release event
+            // GameLogicHandler handles the actual decrement
+            bus.publish_typed(&PlayerLeftJailEvent {
+                player_id: player_id.clone(),
+            }, state);
+        }
+    }
+}
+
+/// Handle landing on a HOSPITAL tile.
+///
+/// If the player is in hospital (hospital_turns > 0), decrement hospital_turns.
+/// When turns reach 0, publish `core:player_released_from_hospital`.
+/// Always publish `core:command_accepted`.
+/// If the player is not in hospital (just visiting), only publish `core:command_accepted`.
+fn handle_hospital(
+    state: &mut GameState,
+    tile_id: &str,
+    _rng: &mut dyn RngService,
+    bus: &mut EventBus,
+) {
+    let active_idx = state.active_player_index;
+    let player_id = match state.players.get(active_idx) {
+        Some(p) => p.id.clone(),
+        None => return,
+    };
+
+    // Publish typed event — GameLogicHandler handles turn decrement / release logic
+    bus.publish_typed(&PlayerVisitedHospital {
+        player_id: player_id.clone(),
+    }, state);
+
+    if let Some(player) = state.players.get(active_idx) {
+        if player.is_in_hospital() && player.hospital_turns == 1 {
+            // After this visit, hospital_turns would reach 0 — publish release event
+            // GameLogicHandler handles the actual decrement
+            bus.publish_typed(&PlayerLeftHospitalEvent {
+                player_id: player_id.clone(),
+            }, state);
+        }
+    }
+}
+
+/// Handle landing on a GO_TO_JAIL tile: send the player directly to jail.
+fn handle_go_to_jail(
+    state: &mut GameState,
+    _tile_id: &str,
+    _rng: &mut dyn RngService,
+    bus: &mut EventBus,
+) {
+    let active_idx = state.active_player_index;
+    let player_id = match state.players.get(active_idx) {
+        Some(p) => p.id.clone(),
+        None => return,
+    };
+
+    // Publish typed event — GameLogicHandler handles jail logic (position, turns, bail abuse)
+    bus.publish_typed(&PlayerSentToJailEvent {
+        player_id: player_id.clone(),
+        turns: 0, // GameLogicHandler will use default turns
+    }, state);
+}
+
+/// Handle landing on a CARD_SHOP tile: notify Flutter to show the card shop dialog.
+fn handle_card_shop(
+    state: &mut GameState,
+    tile_id: &str,
+    _rng: &mut dyn RngService,
+    bus: &mut EventBus,
+) {
+    let active_idx = state.active_player_index;
+    let player_id = match state.players.get(active_idx) {
+        Some(p) => p.id.clone(),
+        None => return,
+    };
+
+    // Publish card_shop_landed event to notify Flutter
     bus.publish_custom(
-        "core:player_moved",
+        "core:card_shop_landed",
         "core",
         serde_json::json!({
-            "player_id": player_id.clone(),
-            "to_tile": tile_id,
+            "player_id": player_id,
+            "tile_id": tile_id,
         }),
         state,
     );
 
-    // If the player is currently in jail (jail_turns > 0), this is a "just visiting" situation
-    // or they are serving their sentence — decrement turns
-    if let Some(player) = state.players.get_mut(active_idx) {
-        if player.is_in_jail() {
-            player.jail_turns -= 1;
-            if player.jail_turns == 0 {
-                bus.publish_custom(
-                    "core:player_released_from_jail",
-                    "core",
-                    serde_json::json!({ "player_id": player_id }),
-                    state,
-                );
-            }
-        } else {
-            // Just visiting — nothing special
-            bus.publish_custom(
-                "core:command_accepted",
-                "core",
-                serde_json::json!({ "name": format!("visiting_jail:{tile_id}") }),
-                state,
-            );
-        }
+    // Publish command_accepted event
+    bus.publish_custom(
+        "core:command_accepted",
+        "core",
+        serde_json::json!({ "name": format!("card_shop:{tile_id}") }),
+        state,
+    );
+}
+
+/// Handle landing on a LOTTERY tile: notify Flutter to show the lottery dialog.
+fn handle_lottery(
+    state: &mut GameState,
+    tile_id: &str,
+    _rng: &mut dyn RngService,
+    bus: &mut EventBus,
+) {
+    let active_idx = state.active_player_index;
+    let player_id = match state.players.get(active_idx) {
+        Some(p) => p.id.clone(),
+        None => return,
+    };
+
+    // Publish lottery_landed event to notify Flutter
+    bus.publish_custom(
+        "core:lottery_landed",
+        "core",
+        serde_json::json!({
+            "player_id": player_id,
+            "tile_id": tile_id,
+        }),
+        state,
+    );
+
+    // Publish command_accepted event
+    bus.publish_custom(
+        "core:command_accepted",
+        "core",
+        serde_json::json!({ "name": format!("lottery:{tile_id}") }),
+        state,
+    );
+}
+
+/// Handle landing on a SPECIAL_PROPERTY tile (Income Tax, Luxury Tax, Free Parking).
+///
+/// Simulation-layer behavior (`_resolveTileEffect`):
+/// - `tax_1` (Income Tax): Deduct $200 from the player, publish `core:income_tax_paid`
+/// - `tax_2` (Luxury Tax): Deduct $100 from the player, publish `core:luxury_tax_paid`
+/// - `park` (Free Parking): Add $200 to the player, publish `core:free_parking_bonus`
+fn handle_special_property(
+    state: &mut GameState,
+    tile_id: &str,
+    _rng: &mut dyn RngService,
+    bus: &mut EventBus,
+) {
+    let active_idx = state.active_player_index;
+    let player_id = match state.players.get(active_idx) {
+        Some(p) => p.id.clone(),
+        None => return,
+    };
+
+    if tile_id.contains("tax_1") {
+        // Income Tax: deduct $200 — GameLogicHandler handles cash deduction
+        bus.publish_typed(&IncomeTaxPaid {
+            player_id: player_id.clone(),
+            amount: 200,
+        }, state);
+        // Legacy custom event for backward compatibility
+        bus.publish_custom(
+            "core:income_tax_paid",
+            "core",
+            serde_json::json!({
+                "player_id": player_id.clone(),
+                "tile_id": tile_id,
+                "amount": 200,
+            }),
+            state,
+        );
+    } else if tile_id.contains("tax_2") {
+        // Luxury Tax: deduct $100 — GameLogicHandler handles cash deduction
+        bus.publish_typed(&LuxuryTaxPaid {
+            player_id: player_id.clone(),
+            amount: 100,
+        }, state);
+        // Legacy custom event for backward compatibility
+        bus.publish_custom(
+            "core:luxury_tax_paid",
+            "core",
+            serde_json::json!({
+                "player_id": player_id.clone(),
+                "tile_id": tile_id,
+                "amount": 100,
+            }),
+            state,
+        );
+    } else if tile_id.contains("park") {
+        // Free Parking: add $200 — GameLogicHandler handles cash addition
+        bus.publish_typed(&FreeParkingBonus {
+            player_id: player_id.clone(),
+            amount: 200,
+        }, state);
+        // Legacy custom event for backward compatibility
+        bus.publish_custom(
+            "core:free_parking_bonus",
+            "core",
+            serde_json::json!({
+                "player_id": player_id.clone(),
+                "tile_id": tile_id,
+                "amount": 200,
+            }),
+            state,
+        );
     }
+
+    // Publish typed event for landing on special property
+    let prop_data = PropertyData {
+        tile_id: tile_id.to_string(),
+        kind: PropertyKind::Special(
+            if tile_id.contains("tax") { SpecialPropertyKind::Bank }
+            else { SpecialPropertyKind::Bank }
+        ),
+        base_price: 0,
+        owner: None,
+        upgrade_level: 0,
+        linked_targets: vec![],
+    };
+    bus.publish_typed(&LandedOnSpecialProperty {
+        player_id,
+        property: prop_data,
+    }, state);
+}
+
+/// Handle landing on a BANK tile.
+///
+/// Simulation-layer behavior: similar to Free Parking — gives the player $200.
+/// Publishes `core:bank_bonus` with `player_id`, `tile_id`, `amount`.
+fn handle_bank(
+    state: &mut GameState,
+    tile_id: &str,
+    _rng: &mut dyn RngService,
+    bus: &mut EventBus,
+) {
+    let active_idx = state.active_player_index;
+    let player_id = match state.players.get(active_idx) {
+        Some(p) => p.id.clone(),
+        None => return,
+    };
+
+    // Publish typed event — GameLogicHandler handles cash addition
+    bus.publish_typed(&BankBonus {
+        player_id: player_id.clone(),
+        amount: 200,
+    }, state);
+
+    // Legacy custom event for backward compatibility
+    bus.publish_custom(
+        "core:bank_bonus",
+        "core",
+        serde_json::json!({
+            "player_id": player_id,
+            "tile_id": tile_id,
+            "amount": 200,
+        }),
+        state,
+    );
+}
+
+/// Handle landing on an EXTENSION_PROPERTY tile.
+///
+/// Simulation-layer behavior: no special handling — just publish events.
+/// Publishes `core:extension_property_landed` with `player_id`, `tile_id`.
+fn handle_extension_property(
+    state: &mut GameState,
+    tile_id: &str,
+    _rng: &mut dyn RngService,
+    bus: &mut EventBus,
+) {
+    let active_idx = state.active_player_index;
+    let player_id = match state.players.get(active_idx) {
+        Some(p) => p.id.clone(),
+        None => return,
+    };
+
+    // Publish extension_property_landed event
+    bus.publish_custom(
+        "core:extension_property_landed",
+        "core",
+        serde_json::json!({
+            "player_id": player_id,
+            "tile_id": tile_id,
+        }),
+        state,
+    );
+
+    // Publish command_accepted event
+    bus.publish_custom(
+        "core:command_accepted",
+        "core",
+        serde_json::json!({ "name": format!("extension_property:{tile_id}") }),
+        state,
+    );
 }
 
 /// Handle landing on a HOSPITAL tile.

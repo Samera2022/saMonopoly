@@ -35,6 +35,19 @@ impl TileBehaviorRegistry {
         Ok(())
     }
 
+    /// Force-register a behavior (overwrites any existing).
+    pub fn register_override(
+        &mut self,
+        tile_type: &str,
+        plugin_id: &str,
+        behavior: TileBehavior,
+    ) {
+        self.behaviors.insert(
+            tile_type.to_string(),
+            (behavior, plugin_id.to_string()),
+        );
+    }
+
     /// Remove all behaviors registered by a plugin
     pub fn unregister_plugin(&mut self, plugin_id: &str) {
         self.behaviors.retain(|_, (_, pid)| pid != plugin_id);

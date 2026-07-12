@@ -193,6 +193,8 @@ impl PluginManager {
 
         // Register subscribers, commands, tile behaviors
         managed.plugin.register_subscribers(bus);
+        managed.plugin.register_pre_hooks(bus);
+        managed.plugin.register_post_hooks(bus);
         
         // Mark as active
         managed.status = PluginStatus::Active;
@@ -296,6 +298,20 @@ impl PluginManager {
             }
         }
         if unresolved.is_empty() { Ok(()) } else { Err(unresolved) }
+    }
+
+    // ─── Hot-plug: register into EventBus ───
+
+    /// Register all active plugins' hooks/subscribers into the given EventBus.
+    /// Used to inject active plugins after a fresh bus is created (e.g. in bridge).
+    pub fn register_into_bus(&mut self, bus: &mut EventBus) {
+        for id in self.active_plugins.clone() {
+            if let Some(managed) = self.get_plugin_mut(&id) {
+                managed.plugin.register_subscribers(bus);
+                managed.plugin.register_pre_hooks(bus);
+                managed.plugin.register_post_hooks(bus);
+            }
+        }
     }
 
     // ─── Helpers ───

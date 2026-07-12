@@ -308,6 +308,16 @@ pub trait Plugin: Send + Sync {
         // default: no subscribers
     }
 
+    /// Optional: plugin can register pre-event hooks.
+    fn register_pre_hooks(&mut self, _bus: &mut EventBus) {
+        // default: no pre-hooks
+    }
+
+    /// Optional: plugin can register post-event hooks.
+    fn register_post_hooks(&mut self, _bus: &mut EventBus) {
+        // default: no post-hooks
+    }
+
     /// Get a metadata info struct for this plugin.
     fn info(&self) -> PluginInfo {
         PluginInfo {
@@ -347,7 +357,7 @@ impl PluginEventInjector {
         &self,
         event_type: &str,
         payload: serde_json::Value,
-        state: &sa_monopoly_domain::GameState,
+        state: &mut sa_monopoly_domain::GameState,
     ) {
         let mut bus = self.bus.blocking_lock();
         bus.publish_custom(event_type, &self.plugin_id, payload, state);
@@ -540,20 +550,26 @@ impl<R: PluginRegistry> PluginLoader<R> {
     }
 
     /// Load a plugin from a [`DynamicLoadConfig`].
+    ///
+    /// Uses [`DescriptorPlugin::from_descriptor_with_runtime`] to create a
+    /// [`DescriptorPlugin`] whose runtime backend matches the given config.
+    /// The actual WASM / dynamic-library loading is deferred until
+    /// [`Plugin::register_subscribers`] is called by the registry.
     pub fn load_dynamic(&mut self, config: DynamicLoadConfig) -> Result<(), PluginError> {
-        // In a full implementation this would dlopen/WASM-load the plugin.
-        // For now we create a descriptor-based plugin.
         let id = config
             .path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown")
             .to_string();
-        let plugin = DescriptorPlugin {
+        let desc = PluginDescriptor {
             id,
             version: "0.1.0".to_string(),
-            load_config: Some(config),
+            path: config.path.clone(),
         };
+        let plugin =
+            DescriptorPlugin::from_descriptor_with_runtime(&desc, &config)
+                .map_err(|e| PluginError::InitFailed(e))?;
         self.registry.register(Box::new(plugin))
     }
 
@@ -665,7 +681,22 @@ pub struct DescriptorPlugin {
     pub id: String,
     pub version: String,
     pub load_config: Option<DynamicLoadConfig>,
+    pub wasm_instance: Option<crate::wasm_runtime::WasmPluginInstance>,
+    pub script_engine: Option<crate::script_runtime::ScriptEngine>,
+    pub dynamic_lib: Option<crate::dynlib_loader::DynamicLibPlugin>,
 }
+
+// SAFETY:
+// `DescriptorPlugin` contains runtime types that are not `Send` / `Sync`
+// (`WasmPluginInstance` and `ScriptEngine`).  However, the `Plugin` trait
+// requires `Send + Sync` on the implementor.  These runtime fields are
+// *only ever accessed through `&mut self` methods* (`register_subscribers`,
+// `register_pre_hooks`, `register_post_hooks`), never through the `&self`
+// methods (`id`, `version`, `info`, …).  Therefore, transferring ownership
+// across threads (Send) or sharing an immutable reference (Sync) is safe
+// because no concurrent read can race with a mutable access.
+unsafe impl Send for DescriptorPlugin {}
+unsafe impl Sync for DescriptorPlugin {}
 
 impl DescriptorPlugin {
     pub fn from_descriptor(desc: &PluginDescriptor) -> Self {
@@ -673,6 +704,109 @@ impl DescriptorPlugin {
             id: desc.id.clone(),
             version: desc.version.clone(),
             load_config: None,
+            wasm_instance: None,
+            script_engine: None,
+            dynamic_lib: None,
+        }
+    }
+
+    /// Create a [`DescriptorPlugin`] with an actual runtime backend loaded
+    /// according to the given [`DynamicLoadConfig`].
+    ///
+    /// - [`LoadKind::Script`] – determines the script engine from the file
+    ///   extension (`.lua` → Lua, `.js`/`.mjs` → JavaScript), creates the
+    ///   engine and runs the file.
+    /// - [`LoadKind::WasmModule`] – stores the config for lazy initialisation
+    ///   inside [`Plugin::register_subscribers`] when the [`EventBus`] becomes
+    ///   available.
+    /// - [`LoadKind::DynamicLibrary`] – same lazy-load strategy as WASM.
+    /// - [`LoadKind::BuiltIn`] – no runtime.
+    pub fn from_descriptor_with_runtime(
+        desc: &PluginDescriptor,
+        load_config: &DynamicLoadConfig,
+    ) -> Result<Self, String> {
+        let mut plugin = Self {
+            id: desc.id.clone(),
+            version: desc.version.clone(),
+            load_config: Some(load_config.clone()),
+            wasm_instance: None,
+            script_engine: None,
+            dynamic_lib: None,
+        };
+
+        match &load_config.kind {
+            LoadKind::Script => {
+                let kind = Self::infer_script_kind(&load_config.path)?;
+                let mut engine = crate::script_runtime::ScriptEngine::new(kind)?;
+                engine.run_file(&load_config.path)?;
+                plugin.script_engine = Some(engine);
+            }
+            LoadKind::WasmModule | LoadKind::DynamicLibrary => {
+                // These require an EventBus, which is only available during
+                // register_subscribers / init.  The actual loading happens
+                // lazily inside register_subscribers().
+            }
+            LoadKind::BuiltIn => {
+                // No runtime to load.
+            }
+        }
+
+        Ok(plugin)
+    }
+
+    /// Infer the [`ScriptEngineKind`](crate::scripting::ScriptEngineKind) from
+    /// the file extension of `path`.
+    fn infer_script_kind(path: &std::path::Path) -> Result<crate::scripting::ScriptEngineKind, String> {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .ok_or_else(|| format!("Script path has no extension: {:?}", path))?;
+        match ext {
+            "lua" => Ok(crate::scripting::ScriptEngineKind::Lua),
+            "js" | "mjs" => Ok(crate::scripting::ScriptEngineKind::JavaScript),
+            other => Err(format!(
+                "Unsupported script extension '.{}'; expected .lua, .js, or .mjs",
+                other
+            )),
+        }
+    }
+
+    /// Lazily initialise a WASM runtime backend when the [`EventBus`] becomes
+    /// available.  Called automatically from [`Plugin::register_subscribers`].
+    fn ensure_wasm_loaded(&mut self, bus: &mut EventBus) {
+        if self.wasm_instance.is_some() {
+            return;
+        }
+        let config = match &self.load_config {
+            Some(c) if c.kind == LoadKind::WasmModule => c,
+            _ => return,
+        };
+
+        log::info!("Lazy-loading WASM plugin '{}' from {:?}", self.id, config.path);
+        match crate::wasm_runtime::WasmPluginRuntime::new() {
+            Ok(runtime) => match runtime.load_plugin(&config.path, bus) {
+                Ok(instance) => self.wasm_instance = Some(instance),
+                Err(e) => log::error!("Failed to lazy-load WASM plugin '{}': {}", self.id, e),
+            },
+            Err(e) => log::error!("Failed to create WASM runtime for '{}': {}", self.id, e),
+        }
+    }
+
+    /// Lazily initialise a dynamic-library backend when the [`EventBus`]
+    /// becomes available.  Called automatically from [`Plugin::register_subscribers`].
+    fn ensure_dynlib_loaded(&mut self, bus: &mut EventBus) {
+        if self.dynamic_lib.is_some() {
+            return;
+        }
+        let config = match &self.load_config {
+            Some(c) if c.kind == LoadKind::DynamicLibrary => c,
+            _ => return,
+        };
+
+        log::info!("Lazy-loading dynamic plugin '{}' from {:?}", self.id, config.path);
+        match crate::dynlib_loader::DynamicLibPlugin::load(&config.path, bus) {
+            Ok(lib) => self.dynamic_lib = Some(lib),
+            Err(e) => log::error!("Failed to lazy-load dynamic plugin '{}': {}", self.id, e),
         }
     }
 }
@@ -698,6 +832,58 @@ impl Plugin for DescriptorPlugin {
             dependencies: Vec::new(),
             engine_compat: String::new(),
         }
+    }
+
+    /// Registers event subscribers for the underlying runtime.
+    ///
+    /// - **WASM** / **DynamicLibrary**: lazily loaded on first call when the
+    ///   [`EventBus`] becomes available.  The loaded instance is stored for
+    ///   subsequent calls.
+    /// - **Script**: already initialised by [`from_descriptor_with_runtime`];
+    ///   no additional registration is needed.
+    fn register_subscribers(&mut self, bus: &mut EventBus) {
+        // Lazy-load runtimes that depend on EventBus.
+        self.ensure_wasm_loaded(bus);
+        self.ensure_dynlib_loaded(bus);
+
+        // Delegate to the WASM instance (host functions were registered during
+        // load_plugin, so nothing extra is needed here – the instance is kept
+        // alive for the plugin's lifetime).
+        if let Some(ref _wasm) = self.wasm_instance {
+            // WASM host functions (subscribe_event, publish_event, get_state)
+            // were already wired up inside WasmPluginRuntime::load_plugin().
+        }
+
+        // Delegate to the script engine – future: register Lua/JS functions as
+        // EventBus subscribers when the scripting runtime supports it.
+        if let Some(ref _engine) = self.script_engine {
+            // The script engine is ready to execute scripts via run()/run_file().
+            // Subscriber registration will be added in a follow-up.
+        }
+
+        // For DynamicLib, load() already called register_subscribers on the
+        // inner plugin, so nothing additional is required here.
+        if let Some(ref _dynlib) = self.dynamic_lib {
+            // Subscribers were registered inside DynamicLibPlugin::load().
+        }
+    }
+
+    /// Delegates pre-hook registration to the loaded dynamic library plugin.
+    /// [`DynamicLibPlugin::load`] already called this, so this is a no-op
+    /// placeholder for future extension.
+    fn register_pre_hooks(&mut self, _bus: &mut EventBus) {
+        if let Some(ref _dynlib) = self.dynamic_lib {
+            // Already registered inside DynamicLibPlugin::load().
+        }
+        // WASM and Script engines do not currently support pre-hooks.
+    }
+
+    /// Delegates post-hook registration to the loaded dynamic library plugin.
+    fn register_post_hooks(&mut self, _bus: &mut EventBus) {
+        if let Some(ref _dynlib) = self.dynamic_lib {
+            // Already registered inside DynamicLibPlugin::load().
+        }
+        // WASM and Script engines do not currently support post-hooks.
     }
 }
 

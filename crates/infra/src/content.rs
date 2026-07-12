@@ -452,6 +452,9 @@ mod tests {
                 allow_card_system: false,
                 auto_link_rent: false,
             },
+            properties: vec![],
+            special_tiles: std::collections::HashMap::new(),
+            chance_tiles: vec![],
             plugins: vec![],
         };
 

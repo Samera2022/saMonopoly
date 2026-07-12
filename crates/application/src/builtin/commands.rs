@@ -5,6 +5,14 @@ use sa_monopoly_domain::events::command_events::{
     PayRentCommand, RedeemCommand, RollCommand, SellSharesCommand, TradeCommand,
     UpgradePropertyCommand, UseCardCommand,
 };
+use sa_monopoly_domain::events::core_events::{
+    AuctionStartedEvent, CardBoughtEvent, CardUsedEvent, DiceRollEnded, DiceRollStarted,
+    EndTurnEvent, LandedOnOwnedProperty, LotteryTicketBoughtEvent, MovementEnded,
+    MovementStarted, PlayerPaidBailEvent, PropertyBoughtEvent, PropertyMortgaged,
+    PropertyRedeemed, PropertyUpgradedEvent, SellSharesExecuted, TradeProposedEvent,
+};
+use sa_monopoly_domain::events::event_data::{CardData, PropertyData};
+use sa_monopoly_domain::tile::tile_types;
 use sa_monopoly_domain::ActiveAuction;
 use sa_monopoly_domain::GameState;
 use sa_monopoly_domain::LotteryState;
@@ -157,6 +165,11 @@ fn handle_roll(
         return;
     }
 
+    // Publish dice roll started event
+    bus.publish_typed(&DiceRollStarted {
+        player_id: cmd.player_id.clone(),
+    }, state);
+
     // Generate dice values
     let dice1 = (rng.next_u64() % 6) + 1;
     let dice2 = (rng.next_u64() % 6) + 1;
@@ -273,8 +286,14 @@ fn handle_roll(
         state.consecutive_doubles = 0;
     }
 
+    // Publish movement started event
+    let steps = (dice1 + dice2) as u64;
+    bus.publish_typed(&MovementStarted {
+        player_id: cmd.player_id.clone(),
+        steps,
+    }, state);
+
     // Move the player
-    let steps = (dice1 + dice2) as usize;
     let from = state.players[active_idx].position.clone();
     let from_index = match state.board.tile_index(&from) {
         Some(i) => i,
@@ -283,7 +302,7 @@ fn handle_roll(
             return;
         }
     };
-    let to_index = (from_index + steps) % state.board.tiles.len();
+    let to_index = (from_index + steps as usize) % state.board.tiles.len();
     let to = state.board.tiles[to_index].id.clone();
     let passed_start = to_index < from_index;
 
@@ -315,6 +334,31 @@ fn handle_roll(
         }),
         state,
     );
+
+    // Publish movement ended
+    bus.publish_typed(&MovementEnded {
+        player_id: cmd.player_id.clone(),
+        steps,
+    }, state);
+    // Publish dice roll ended
+    bus.publish_typed(&DiceRollEnded {
+        player_id: cmd.player_id.clone(),
+        dice1,
+        dice2,
+        is_seven: dice1 + dice2 == 7,
+        consecutive: state.consecutive_doubles,
+    }, state);
+
+    // Resolve tile landing (skip property types — handled by Flutter for buy/upgrade/rent)
+    let tile_kind = state.board.tiles[to_index].kind.clone();
+    log::info!("[TRACE] handle_roll: resolving tile kind='{tile_kind}' id='{to}' player_pos='{}'", state.players[active_idx].position);
+    let is_property = tile_kind == tile_types::ORDINARY_PROPERTY
+        || tile_kind == tile_types::SPECIAL_PROPERTY
+        || tile_kind == tile_types::EXTENSION_PROPERTY;
+    log::info!("[TRACE] handle_roll: is_property={is_property}, will_resolve={} (skip property types)", !is_property);
+    if !is_property {
+        bus.resolve_tile(&tile_kind, state, &to, rng);
+    }
 
     // Publish command accepted
     bus.publish_custom(
@@ -395,35 +439,13 @@ fn handle_buy_property(
         return;
     }
 
-    // Execute purchase: deduct cash and set owner
-    if let Some(player) = state.players.get_mut(active_idx) {
-        player.cash -= price;
-    }
-    if let Some(prop) = state.board.property_mut(&cmd.tile_id) {
-        prop.owner = Some(cmd.player_id.clone());
-    }
-
-    // Publish property bought event
-    bus.publish_custom(
-        "core:property_bought",
-        "core",
-        serde_json::json!({
-            "player_id": cmd.player_id.clone(),
-            "tile_id": cmd.tile_id.clone(),
-            "_state_diff": {
-                "player_id": cmd.player_id.clone(),
-                "tile_id": cmd.tile_id.clone(),
-                "cash_change": -price,
-            },
-        }),
-        state,
-    );
-
-    // Publish command accepted
-    bus.publish_custom(
-        "core:command_accepted",
-        "core",
-        serde_json::json!({ "name": "buy_property" }),
+    // Publish typed event — GameLogicHandler subscriber applies state changes
+    let prop_data = PropertyData::from(&property);
+    bus.publish_typed(
+        &PropertyBoughtEvent {
+            player_id: cmd.player_id.clone(),
+            property: prop_data,
+        },
         state,
     );
 }
@@ -491,40 +513,19 @@ fn handle_pay_bail(
         return;
     }
 
-    // Execute bail payment: deduct cash, clear jail_turns, increment abuse count
-    if let Some(player) = state.players.get_mut(active_idx) {
-        player.cash -= bail_amount;
-        player.jail_turns = 0;
-    }
-    state.bail_abuse_count += 1;
-
-    // Publish bail paid event
-    bus.publish_custom(
-        "core:bail_paid",
-        "core",
-        serde_json::json!({
-            "player_id": cmd.player_id.clone(),
-            "amount": bail_amount,
-            "_state_diff": {
-                "player_id": cmd.player_id.clone(),
-                "cash_change": -(bail_amount as i64),
-                "jail_cleared": true,
-            },
-        }),
-        state,
-    );
-
-    // Publish command accepted
-    bus.publish_custom(
-        "core:command_accepted",
-        "core",
-        serde_json::json!({ "name": "pay_bail" }),
+    // Publish typed event — GameLogicHandler subscriber applies state changes
+    bus.publish_typed(
+        &PlayerPaidBailEvent {
+            player_id: cmd.player_id.clone(),
+            amount: bail_amount,
+        },
         state,
     );
 }
 
-/// Handle the `end_turn` command: eliminate bankrupt players, advance the turn,
-/// check if the game has been won.
+/// Handle the `end_turn` command: validate active player, then publish
+/// EndTurnEvent. GameLogicHandler subscriber executes all turn-advance logic
+/// (bankruptcy detection, turn counter increment, next-player selection, etc.).
 fn handle_end_turn(
     state: &mut GameState,
     event: AnyEvent,
@@ -552,80 +553,13 @@ fn handle_end_turn(
         return;
     }
 
-    // Eliminate bankrupt players
-    let mut eliminated_players: Vec<String> = Vec::new();
-    let bankrupt_ids: Vec<String> = state
-        .players
-        .iter()
-        .filter(|p| p.is_bankrupt())
-        .map(|p| p.id.clone())
-        .collect();
-
-    for pid in &bankrupt_ids {
-        // Publish player bankrupt event
-        bus.publish_custom(
-            "core:player_bankrupt",
-            "core",
-            serde_json::json!({ "player_id": pid }),
-            state,
-        );
-        // Publish player eliminated event
-        bus.publish_custom(
-            "core:player_eliminated",
-            "core",
-            serde_json::json!({ "player_id": pid }),
-            state,
-        );
-        eliminated_players.push(pid.clone());
-    }
-
-    // Advance the turn
-    state.current_turn += 1;
-    state.consecutive_doubles = 0;
-
-    // Find next non-bankrupt player
-    let player_count = state.players.len();
-    let mut next_index = (active_idx + 1) % player_count;
-    let mut attempts = 0;
-    while attempts < player_count {
-        if !state.players[next_index].is_bankrupt() {
-            break;
-        }
-        next_index = (next_index + 1) % player_count;
-        attempts += 1;
-    }
-    state.active_player_index = next_index;
-
-    // Publish turn advanced event
-    bus.publish_custom(
-        "core:turn_advanced",
-        "core",
-        serde_json::json!({
-            "turn": state.current_turn,
-            "eliminated_players": eliminated_players,
-        }),
+    // Publish typed event — GameLogicHandler subscriber applies all turn-advance logic
+    bus.publish_typed(
+        &EndTurnEvent {
+            player_id: cmd.player_id.clone(),
+        },
         state,
     );
-
-    // Check game won condition: only one player/team remains solvent
-    let remaining = state
-        .players
-        .iter()
-        .filter(|p| !p.is_bankrupt())
-        .count();
-    if remaining <= 1 {
-        if let Some(winner) = state.players.iter().find(|p| !p.is_bankrupt()) {
-            bus.publish_custom(
-                "core:game_won",
-                "core",
-                serde_json::json!({
-                    "winner_id": winner.id,
-                    "remaining_players": remaining,
-                }),
-                state,
-            );
-        }
-    }
 }
 
 /// Handle the `buy_card` command: check affordability, deduct cash, add card
@@ -672,29 +606,13 @@ fn handle_buy_card(
         return;
     }
 
-    // Execute purchase: deduct cash and add card to owned_cards
-    if let Some(player) = state.players.get_mut(active_idx) {
-        player.cash -= cmd.price;
-        player.owned_cards.push(cmd.card_id.clone());
-    }
-
-    // Publish card bought event
-    bus.publish_custom(
-        "core:card_bought",
-        "core",
-        serde_json::json!({
-            "player_id": cmd.player_id.clone(),
-            "card_id": cmd.card_id.clone(),
-            "price": cmd.price,
-        }),
-        state,
-    );
-
-    // Publish command accepted
-    bus.publish_custom(
-        "core:command_accepted",
-        "core",
-        serde_json::json!({ "name": "buy_card" }),
+    // Publish typed event — GameLogicHandler subscriber applies state changes
+    bus.publish_typed(
+        &CardBoughtEvent {
+            player_id: cmd.player_id.clone(),
+            card_id: cmd.card_id.clone(),
+            price: cmd.price,
+        },
         state,
     );
 }
@@ -754,33 +672,12 @@ fn handle_buy_lottery_ticket(
         return;
     }
 
-    // Execute purchase: deduct cash
-    if let Some(player) = state.players.get_mut(active_idx) {
-        player.cash -= ticket_price;
-    }
-
-    // Record the chosen number in lottery state
-    if let Some(ref mut lottery) = state.lottery_state {
-        lottery.player_numbers.insert(cmd.player_id.clone(), cmd.number);
-    }
-
-    // Publish lottery ticket bought event
-    bus.publish_custom(
-        "core:lottery_ticket_bought",
-        "core",
-        serde_json::json!({
-            "player_id": cmd.player_id.clone(),
-            "number": cmd.number,
-            "ticket_price": ticket_price,
-        }),
-        state,
-    );
-
-    // Publish command accepted
-    bus.publish_custom(
-        "core:command_accepted",
-        "core",
-        serde_json::json!({ "name": "buy_lottery_ticket" }),
+    // Publish typed event — GameLogicHandler subscriber applies state changes
+    bus.publish_typed(
+        &LotteryTicketBoughtEvent {
+            player_id: cmd.player_id.clone(),
+            number: cmd.number as u64,
+        },
         state,
     );
 }
@@ -868,42 +765,13 @@ fn handle_upgrade_property(
         return;
     }
 
-    // Execute upgrade: deduct cash and increment upgrade level
-    if let Some(player) = state.players.get_mut(active_idx) {
-        player.cash -= cost;
-    }
-    let new_level: u32;
-    if let Some(prop) = state.board.property_mut(&cmd.tile_id) {
-        prop.upgrade_level += 1;
-        new_level = prop.upgrade_level;
-    } else {
-        return;
-    }
-
-    // Publish property upgraded event
-    bus.publish_custom(
-        "core:property_upgraded",
-        "core",
-        serde_json::json!({
-            "player_id": cmd.player_id.clone(),
-            "tile_id": cmd.tile_id.clone(),
-            "new_level": new_level,
-            "cost": cost,
-            "_state_diff": {
-                "player_id": cmd.player_id.clone(),
-                "tile_id": cmd.tile_id.clone(),
-                "cash_change": -(cost as i64),
-                "new_level": new_level,
-            },
-        }),
-        state,
-    );
-
-    // Publish command accepted
-    bus.publish_custom(
-        "core:command_accepted",
-        "core",
-        serde_json::json!({ "name": "upgrade_property" }),
+    // Publish typed event — GameLogicHandler subscriber applies state changes
+    let prop_data = PropertyData::from(&property);
+    bus.publish_typed(
+        &PropertyUpgradedEvent {
+            player_id: cmd.player_id.clone(),
+            property: prop_data,
+        },
         state,
     );
 }
@@ -953,27 +821,24 @@ fn handle_use_card(
         return;
     }
 
-    // Consume the card: remove card_id from owned_cards
-    if let Some(player) = state.players.get_mut(active_idx) {
-        player.owned_cards.retain(|c| c != &cmd.card_id);
-    }
-
-    // Publish card used event
-    bus.publish_custom(
-        "core:card_used",
-        "core",
-        serde_json::json!({
-            "player_id": cmd.player_id.clone(),
-            "card_id": cmd.card_id.clone(),
-        }),
-        state,
-    );
-
-    // Publish command accepted
-    bus.publish_custom(
-        "core:command_accepted",
-        "core",
-        serde_json::json!({ "name": "use_card" }),
+    // Publish typed event — GameLogicHandler subscriber applies state changes
+    let card_data = state
+        .decks
+        .iter()
+        .flat_map(|d| d.cards.iter())
+        .find(|c| c.id == cmd.card_id)
+        .map(CardData::from)
+        .unwrap_or_else(|| CardData {
+            id: cmd.card_id.clone(),
+            name_key: String::new(),
+            effect_key: String::new(),
+        });
+    bus.publish_typed(
+        &CardUsedEvent {
+            player_id: cmd.player_id.clone(),
+            card: card_data,
+            target: None,
+        },
         state,
     );
 }
@@ -1044,31 +909,14 @@ fn handle_mortgage(
         return;
     }
 
-    // Execute mortgage: set is_mortgaged and credit player with 100 cash
+    // Publish typed PropertyMortgaged event → handled by GameLogicHandler
     let amount: i64 = 100;
-    if let Some(prop) = state.board.property_mut(&cmd.tile_id) {
-        prop.is_mortgaged = true;
-    }
-    if let Some(player) = state.players.get_mut(active_idx) {
-        player.cash += amount;
-    }
-
-    // Publish property mortgaged event
-    bus.publish_custom(
-        "core:property_mortgaged",
-        "core",
-        serde_json::json!({
-            "tile_id": cmd.tile_id.clone(),
-            "amount": amount,
-        }),
-        state,
-    );
-
-    // Publish command accepted
-    bus.publish_custom(
-        "core:command_accepted",
-        "core",
-        serde_json::json!({ "name": "mortgage" }),
+    bus.publish_typed(
+        &PropertyMortgaged {
+            player_id: cmd.player_id.clone(),
+            tile_id: cmd.tile_id.clone(),
+            amount,
+        },
         state,
     );
 }
@@ -1155,37 +1003,20 @@ fn handle_redeem(
         return;
     }
 
-    // Execute redemption: un-mortgage the property and deduct cash
-    if let Some(prop) = state.board.property_mut(&cmd.tile_id) {
-        prop.is_mortgaged = false;
-    }
-    if let Some(player) = state.players.get_mut(active_idx) {
-        player.cash -= amount;
-    }
-
-    // Publish property redeemed event
-    bus.publish_custom(
-        "core:property_redeemed",
-        "core",
-        serde_json::json!({
-            "tile_id": cmd.tile_id.clone(),
-            "amount": amount,
-        }),
-        state,
-    );
-
-    // Publish command accepted
-    bus.publish_custom(
-        "core:command_accepted",
-        "core",
-        serde_json::json!({ "name": "redeem" }),
+    // Publish typed PropertyRedeemed event → handled by GameLogicHandler
+    bus.publish_typed(
+        &PropertyRedeemed {
+            player_id: cmd.player_id.clone(),
+            tile_id: cmd.tile_id.clone(),
+            amount,
+        },
         state,
     );
 }
 
 /// Handle the `pay_rent` command: locate the property and its owner,
-/// calculate rent, transfer funds from the active player to the owner,
-/// and publish result events.
+/// calculate rent, validate, fire pre-hook, then publish typed event.
+/// GameLogicHandler subscriber performs the actual cash transfer.
 fn handle_pay_rent(
     state: &mut GameState,
     event: AnyEvent,
@@ -1255,13 +1086,36 @@ fn handle_pay_rent(
     // Calculate rent
     let rent_amount = property.current_rent();
 
-    // Check affordability
+    // ★ Pre-Event: 让插件决定是否/如何收租
+    let pre = bus.fire_command_pre_hook("core:rent_due", serde_json::json!({
+        "player_id": cmd.player_id.clone(),
+        "owner_id": owner_id.clone(),
+        "amount": rent_amount,
+        "tile_id": cmd.tile_id.clone(),
+    }), state);
+
+    if pre.is_canceled() {
+        bus.publish_custom("core:command_rejected", "core",
+            serde_json::json!({
+                "reason": "cancelled_by_plugin",
+                "plugin_event": "core:rent_due",
+                "cancel_reason": pre.payload.get("cancel_reason"),
+            }), state);
+        return;
+    }
+
+    // 插件可能修改了金额
+    let final_amount = pre.payload.get("amount")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(rent_amount);
+
+    // Check affordability (using final_amount)
     if let Some(player) = state.players.get(active_idx) {
-        if !player.can_afford(rent_amount) {
+        if !player.can_afford(final_amount) {
             bus.publish_custom(
                 "core:command_rejected",
                 "core",
-                serde_json::json!({ "reason": format!("Cannot afford rent: need ${rent_amount}, have ${}", player.cash) }),
+                serde_json::json!({ "reason": format!("Cannot afford rent: need ${final_amount}, have ${}", player.cash) }),
                 state,
             );
             return;
@@ -1270,8 +1124,8 @@ fn handle_pay_rent(
         return;
     }
 
-    // Find the owner's index in the players vector
-    let owner_idx = match state.players.iter().position(|p| p.id == owner_id) {
+    // Find the owner's index in the players vector (validation only)
+    let _owner_idx = match state.players.iter().position(|p| p.id == owner_id) {
         Some(idx) => idx,
         None => {
             log::error!("[builtin::pay_rent] owner '{owner_id}' not found in players list");
@@ -1279,38 +1133,15 @@ fn handle_pay_rent(
         }
     };
 
-    // Execute rent transfer: deduct from payer, add to owner
-    if let Some(player) = state.players.get_mut(active_idx) {
-        player.cash -= rent_amount;
-    }
-    if let Some(owner) = state.players.get_mut(owner_idx) {
-        owner.cash += rent_amount;
-    }
-
-    // Publish rent paid event
-    bus.publish_custom(
-        "core:rent_paid",
-        "core",
-        serde_json::json!({
-            "from_player_id": cmd.player_id.clone(),
-            "to_player_id": owner_id.clone(),
-            "amount": rent_amount,
-            "tile_id": cmd.tile_id.clone(),
-            "_state_diff": {
-                "from_player_id": cmd.player_id.clone(),
-                "to_player_id": owner_id.clone(),
-                "from_cash_change": -(rent_amount as i64),
-                "to_cash_change": rent_amount as i64,
-            },
-        }),
-        state,
-    );
-
-    // Publish command accepted
-    bus.publish_custom(
-        "core:command_accepted",
-        "core",
-        serde_json::json!({ "name": "pay_rent" }),
+    // Publish typed event — GameLogicHandler subscriber performs cash transfer
+    let prop_data = PropertyData::from(&property);
+    bus.publish_typed(
+        &LandedOnOwnedProperty {
+            from_player_id: cmd.player_id.clone(),
+            to_player_id: owner_id.clone(),
+            property: prop_data,
+            amount: final_amount,
+        },
         state,
     );
 }
@@ -1359,6 +1190,15 @@ fn handle_auction(
             "tile_id": cmd.tile_id.clone(),
             "starting_bid": cmd.starting_bid,
         }),
+        state,
+    );
+
+    // Publish typed event
+    bus.publish_typed(
+        &AuctionStartedEvent {
+            initiator_id: cmd.player_id.clone(),
+            tile_id: cmd.tile_id.clone(),
+        },
         state,
     );
 
@@ -1481,6 +1321,15 @@ fn handle_trade(
             "from_player_id": cmd.from_player_id.clone(),
             "to_player_id": cmd.to_player_id.clone(),
         }),
+        state,
+    );
+
+    // Publish typed event
+    bus.publish_typed(
+        &TradeProposedEvent {
+            from_player_id: cmd.from_player_id.clone(),
+            to_player_id: cmd.to_player_id.clone(),
+        },
         state,
     );
 
@@ -1611,28 +1460,14 @@ fn handle_sell_shares(
 
     // Execute sale: deduct shares and add cash (simplified price: shares * 100)
     let total_price = cmd.shares as i64 * 100;
-    if let Some(player) = state.players.get_mut(active_idx) {
-        player.stock_shares -= cmd.shares;
-        player.cash += total_price;
-    }
 
-    // Publish shares sold event
-    bus.publish_custom(
-        "core:shares_sold",
-        "core",
-        serde_json::json!({
-            "player_id": cmd.player_id.clone(),
-            "shares": cmd.shares,
-            "total_price": total_price,
-        }),
-        state,
-    );
-
-    // Publish command accepted
-    bus.publish_custom(
-        "core:command_accepted",
-        "core",
-        serde_json::json!({ "name": "sell_shares" }),
+    // Publish typed event — GameLogicHandler subscriber applies state changes
+    bus.publish_typed(
+        &SellSharesExecuted {
+            player_id: cmd.player_id.clone(),
+            shares: cmd.shares,
+            total_price,
+        },
         state,
     );
 }
