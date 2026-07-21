@@ -15,9 +15,26 @@ async-trait = "0.1"
 log = "0.4"
 once_cell = "1"
 tokio = { version = "1", features = ["sync", "rt"] }
+ureq = "2"
 zip = "2"
 base64 = "0.22"
 sa-monopoly-domain = { path = "../domain" }
+
+# OS keychain / credential-store integration for secret (API key) storage.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+# Linux uses the pure-Rust zbus Secret Service backend (async-secret-service)
+# to avoid a system libdbus (C) build dependency. keyring's Entry API stays
+# synchronous and blocks on the internal async-io runtime.
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["async-secret-service", "crypto-rust", "async-io"] }
 
 [dev-dependencies]
 env_logger = "0.11"

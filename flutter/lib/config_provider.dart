@@ -22,6 +22,7 @@ class ConfigProvider {
   AppConfig _app = const AppConfig();
   GameConfig _game = const GameConfig();
   AiConfig _ai = const AiConfig();
+  LlmApiConfig _llmApi = const LlmApiConfig();
   NetworkConfig _network = const NetworkConfig();
   ContentConfig _content = const ContentConfig();
 
@@ -38,6 +39,7 @@ class ConfigProvider {
   AppConfig get app => _app;
   GameConfig get game => _game;
   AiConfig get ai => _ai;
+  LlmApiConfig get llmApi => _llmApi;
   NetworkConfig get network => _network;
   ContentConfig get content => _content;
 
@@ -66,6 +68,68 @@ class ConfigProvider {
   void updateContent(ContentConfig config) {
     _content = config;
     _persist('content', config.toJson());
+  }
+
+  /// Reload LLM API config from Rust engine (picks up UI changes).
+  ///
+  /// Returns a [ConfigSaveResult] so callers can detect a failed reload
+  /// instead of silently proceeding with stale or default configuration.
+  ConfigSaveResult reloadLlmApi() {
+    final client = _client;
+    if (client == null) {
+      return const ConfigSaveResult.failure('配置存储不可用');
+    }
+    final result = client.configLoad();
+    if (result == null) {
+      return const ConfigSaveResult.failure('无法从引擎加载配置');
+    }
+    try {
+      final decoded = jsonDecode(result) as Map<String, dynamic>;
+      if (decoded['ok'] == false) {
+        return ConfigSaveResult.failure(
+            decoded['error'] as String? ?? '配置加载失败');
+      }
+      final sections = decoded['sections'] as Map<String, dynamic>?;
+      if (sections != null && sections['llm_api'] != null) {
+        _llmApi = LlmApiConfig.fromJson(sections['llm_api'] as Map<String, dynamic>);
+        debugPrint('[Config] Reloaded LLM API config: ${_llmApi.a2cmEndpoint}');
+      }
+      return const ConfigSaveResult.success();
+    } catch (e) {
+      return ConfigSaveResult.failure('无法解析配置: $e');
+    }
+  }
+
+  void updateLlmApi(LlmApiConfig config) {
+    _llmApi = config;
+    _persist('llm_api', config.toJson());
+  }
+
+  /// Persist related settings in one write so the UI cannot report a partial save.
+  ConfigSaveResult updateSettings({
+    required GameConfig game,
+    required LlmApiConfig llmApi,
+  }) {
+    final previousGame = _game;
+    final previousLlmApi = _llmApi;
+    _game = game;
+    _llmApi = llmApi;
+    ConfigSaveResult result;
+    try {
+      result = _persistSections({
+        'game': game.toJson(),
+        'llm_api': llmApi.toJson(),
+      });
+    } catch (e) {
+      // Persist/encode may throw (e.g. non-finite numbers). Keep the save
+      // exception-atomic so failed saves never leave stale in-memory state.
+      result = ConfigSaveResult.failure('配置保存异常: $e');
+    }
+    if (!result.success) {
+      _game = previousGame;
+      _llmApi = previousLlmApi;
+    }
+    return result;
   }
 
   // ── Engine persistence ──────────────────────────────────────────────────
@@ -111,6 +175,10 @@ class ConfigProvider {
         _content = ContentConfig.fromJson(
             sections['content'] as Map<String, dynamic>);
       }
+      if (sections['llm_api'] != null) {
+        _llmApi = LlmApiConfig.fromJson(
+            sections['llm_api'] as Map<String, dynamic>);
+      }
 
       debugPrint('Config loaded from Rust engine');
     } catch (e) {
@@ -124,8 +192,15 @@ class ConfigProvider {
   /// [section] with the new [value], and saves it back.  In standalone mode
   /// (no bridge client) this is a no-op.
   void _persist(String section, Map<String, dynamic> value) {
+    _persistSections({section: value});
+  }
+
+  ConfigSaveResult _persistSections(
+      Map<String, Map<String, dynamic>> updates) {
     final client = _client;
-    if (client == null) return;
+    if (client == null) {
+      return const ConfigSaveResult.failure('配置存储不可用');
+    }
 
     // Load the existing config document from the engine so we merge,
     // not overwrite, other sections.
@@ -143,12 +218,34 @@ class ConfigProvider {
 
     // Ensure sections map exists.
     doc['sections'] ??= <String, dynamic>{};
-    (doc['sections'] as Map<String, dynamic>)[section] = value;
+    (doc['sections'] as Map<String, dynamic>).addAll(updates);
 
     // Save the full document back.
     final jsonStr = jsonEncode(doc);
-    client.configSave(jsonStr);
+    final response = client.configSave(jsonStr);
+    if (response == null) {
+      return const ConfigSaveResult.failure('Rust 配置存储不可用');
+    }
+    try {
+      final decoded = jsonDecode(response) as Map<String, dynamic>;
+      if (decoded['ok'] == true) return const ConfigSaveResult.success();
+      return ConfigSaveResult.failure(
+          decoded['error'] as String? ?? '配置保存失败');
+    } catch (e) {
+      return ConfigSaveResult.failure('无法解析配置保存结果: $e');
+    }
   }
+}
+
+class ConfigSaveResult {
+  final bool success;
+  final String? error;
+
+  const ConfigSaveResult.success()
+      : success = true,
+        error = null;
+
+  const ConfigSaveResult.failure(this.error) : success = false;
 }
 
 // ============================================================================
@@ -442,5 +539,56 @@ class ContentConfig {
         'enabled_maps': enabledMaps,
         'enabled_packs': enabledPacks,
         'custom_content_paths': customContentPaths,
+      };
+}
+
+// ============================================================================
+// LlmApiConfig
+// ============================================================================
+
+/// LLM API connection settings, persisted as the "llm_api" section.
+class LlmApiConfig {
+  /// Backend type: "direct" for OpenAI-compatible API, "a2cm" for A2CM companion.
+  final String backend;
+  final String apiEndpoint;
+  final String a2cmEndpoint;
+  final String apiKey;
+  final String model;
+  final double temperature;
+  final int maxTokens;
+  final String customHeaders;
+
+  const LlmApiConfig({
+    this.backend = 'direct',
+    this.apiEndpoint = 'https://api.openai.com/v1/chat/completions',
+    this.a2cmEndpoint = 'http://localhost:8000',
+    this.apiKey = '',
+    this.model = 'gpt-4',
+    this.temperature = 0.7,
+    this.maxTokens = 512,
+    this.customHeaders = '',
+  });
+
+  factory LlmApiConfig.fromJson(Map<String, dynamic> json) => LlmApiConfig(
+        backend: json['backend'] as String? ?? 'direct',
+        apiEndpoint:
+            json['api_endpoint'] as String? ?? 'https://api.openai.com/v1/chat/completions',
+        a2cmEndpoint: json['a2cm_endpoint'] as String? ?? 'http://localhost:8000',
+        apiKey: json['api_key'] as String? ?? '',
+        model: json['model'] as String? ?? 'gpt-4',
+        temperature: (json['temperature'] as num?)?.toDouble() ?? 0.7,
+        maxTokens: (json['max_tokens'] as num?)?.toInt() ?? 512,
+        customHeaders: json['custom_headers'] as String? ?? '',
+      );
+
+  Map<String, dynamic> toJson() => {
+        'backend': backend,
+        'api_endpoint': apiEndpoint,
+        'a2cm_endpoint': a2cmEndpoint,
+        'api_key': apiKey,
+        'model': model,
+        'temperature': temperature,
+        'max_tokens': maxTokens,
+        'custom_headers': customHeaders,
       };
 }

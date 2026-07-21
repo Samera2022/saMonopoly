@@ -237,6 +237,62 @@ impl Default for ContentConfig {
     }
 }
 
+// ── LLM API Configuration ─────────────────────────────────────────────────
+
+/// LLM API connection settings for AI players.
+///
+/// Persisted as the "llm_api" section in the config document.
+///
+/// SECURITY: `api_key` is written to the on-disk config file in plaintext by
+/// default. Prefer an `env:VAR_NAME` reference (resolved at request time by the
+/// LLM backend) so the raw secret never touches disk. A future improvement is
+/// to store secrets in a platform credential store.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmApiConfig {
+    /// Backend type: "direct" or "a2cm".
+    #[serde(default = "default_llm_backend")]
+    pub backend: String,
+    /// API endpoint URL (e.g. "https://api.openai.com/v1/chat/completions").
+    pub api_endpoint: String,
+    /// A2CM companion endpoint.
+    #[serde(default = "default_a2cm_endpoint")]
+    pub a2cm_endpoint: String,
+    /// API key for authentication.
+    pub api_key: String,
+    /// Model identifier (e.g. "gpt-4", "gpt-4-turbo", "claude-3-opus").
+    pub model: String,
+    /// Sampling temperature (0.0 – 2.0). Lower = more deterministic.
+    pub temperature: f64,
+    /// Maximum tokens in the response.
+    pub max_tokens: u32,
+    /// Custom HTTP headers as JSON object (e.g. {"X-Custom-Header": "value"}).
+    #[serde(default)]
+    pub custom_headers: String,
+}
+
+impl Default for LlmApiConfig {
+    fn default() -> Self {
+        Self {
+            backend: default_llm_backend(),
+            api_endpoint: "https://api.openai.com/v1/chat/completions".to_string(),
+            a2cm_endpoint: default_a2cm_endpoint(),
+            api_key: String::new(),
+            model: "gpt-4".to_string(),
+            temperature: 0.7,
+            max_tokens: 512,
+            custom_headers: String::new(),
+        }
+    }
+}
+
+fn default_llm_backend() -> String {
+    "direct".to_string()
+}
+
+fn default_a2cm_endpoint() -> String {
+    "http://localhost:8000".to_string()
+}
+
 // ── Error ───────────────────────────────────────────────────────────────────
 
 use thiserror::Error;

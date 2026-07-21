@@ -151,6 +151,14 @@ class BridgeCommand {
   factory BridgeCommand.processAiTurn() =>
       const BridgeCommand(type: 'core:command:process_ai_turn');
 
+  /// Get the LLM context + prompt for the current game state.
+  /// Returns structured context and a human-readable prompt for LLM decision-making.
+  factory BridgeCommand.llmContext({String? playerId}) =>
+      BridgeCommand(
+        type: 'core:command:llm_context',
+        params: {if (playerId != null) 'player_id': playerId},
+      );
+
   /// Evaluate an AI decision using the strategic engine (no state mutation).
   ///
   /// Supported actions:
@@ -882,6 +890,58 @@ class BridgeClient {
   /// Input: JSON string `{"local_rev": u64, "remote_rev": u64}`.
   /// Returns: `{"conflict": true/false}`, or null if unavailable.
   String? syncConflict(String payloadJson) => _engine.syncConflict(payloadJson);
+
+  /// Get the LLM context + prompt for the current game state.
+  /// Returns `{context: LlmContext, prompt: String, player_id: String}`.
+  /// The prompt can be sent to an LLM API for decision-making.
+  ///
+  /// [eventLog] — optional list of recent action log entries to include
+  /// in the LLM context so it knows what happened in recent turns.
+  Future<Map<String, dynamic>> getLlmContext({
+    String? playerId,
+    required Map<String, dynamic> currentState,
+    List<String>? eventLog,
+  }) async {
+    if (!_engine.isAvailable) {
+      throw Exception('Rust engine not available');
+    }
+
+    var pid = playerId;
+    if (pid == null) {
+      final players = (currentState['players'] as List<dynamic>?) ?? [];
+      final idx = (currentState['active_player_index'] as num?)?.toInt() ?? 0;
+      if (idx < players.length) {
+        final player = players[idx] as Map<String, dynamic>;
+        pid = player['id'] as String?;
+      }
+    }
+
+    // Build params including player_id and optional event_log
+    final params = <String, dynamic>{'player_id': pid};
+    if (eventLog != null && eventLog.isNotEmpty) {
+      params['event_log'] = eventLog;
+    }
+
+    final cmd = BridgeCommand(
+      type: 'core:command:llm_context',
+      params: params,
+    );
+    final request = BridgeRequest(command: cmd, state: currentState);
+    final jsonPayload = buildRequest(request);
+    final responseText = _engine.execute(jsonPayload);
+    if (responseText == null) {
+      throw Exception('Rust engine returned null');
+    }
+
+    final decoded = jsonDecode(responseText);
+    if (decoded is! Map<String, dynamic>) {
+      throw Exception('Rust engine returned non-map response');
+    }
+    if (decoded.containsKey('error')) {
+      throw Exception('Rust engine error: ${decoded['error']}');
+    }
+    return decoded;
+  }
 
   /// Parse a list of players from a GameState JSON map.
   static List<PlayerViewModel> parsePlayers(Map<String, dynamic> state) {

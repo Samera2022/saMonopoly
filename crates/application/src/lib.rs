@@ -21,6 +21,9 @@ pub mod subscribers;
 pub mod systems;
 pub mod tile_behavior;
 pub mod turn_processor;
+pub mod llm_backend;
+pub mod llm_player;
+pub mod secret_store;
 pub mod plugin_controller;
 
 pub mod builtin;

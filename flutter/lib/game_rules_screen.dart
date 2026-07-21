@@ -86,6 +86,27 @@ class _GameRulesScreenState extends State<GameRulesScreen> {
     super.dispose();
   }
 
+  bool _validateGameConfig() {
+    final checks = <String, int?>{
+      '起始资金': int.tryParse(_startCashCtrl.text),
+      '经过奖金': int.tryParse(_passBonusCtrl.text),
+      '监狱回合': int.tryParse(_jailTurnsCtrl.text),
+      '医院回合': int.tryParse(_hospitalTurnsCtrl.text),
+      '升级等级': int.tryParse(_maxUpgradeCtrl.text),
+    };
+    for (final entry in checks.entries) {
+      final v = entry.value;
+      if (v == null || v < 0) {
+        if (!mounted) return false;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${entry.key} 无效，请检查输入')),
+        );
+        return false;
+      }
+    }
+    return true;
+  }
+
   void _saveConfig() {
     _configProvider.updateGame(GameConfig(
       startingCash: int.tryParse(_startCashCtrl.text) ?? CommandConstants.startingCash,
@@ -106,6 +127,7 @@ class _GameRulesScreenState extends State<GameRulesScreen> {
 
   /// Start the game.
   void _onStartGame() {
+    if (!_validateGameConfig()) return;
     _saveConfig();
 
     // Build player names and AI flags

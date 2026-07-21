@@ -216,6 +216,15 @@ impl EngineBridge {
         if request.command_type == "core:command:ai_evaluate" {
             return Self::handle_ai_evaluate(request);
         }
+        if request.command_type == "core:command:llm_context" {
+            return Self::handle_llm_context(request);
+        }
+        if request.command_type == "core:command:llm_decide" {
+            return Self::handle_llm_decide(request);
+        }
+        if request.command_type == "core:command:llm_test_connection" {
+            return Self::handle_llm_test_connection(request);
+        }
 
         let mut bus = EventBus::new();
         // Register core command handlers and tile behaviors so the engine
@@ -242,6 +251,17 @@ impl EngineBridge {
 
         let mut state: GameState = serde_json::from_value(request.state.clone())
             .map_err(|e| format!("Invalid state: {e}"))?;
+
+        // Log whether this is a rule AI or LLM player for debugging
+        let is_llm = state.active_player()
+            .map(|p| p.is_llm_controlled)
+            .unwrap_or(false);
+        log::info!(
+            "[{}] Processing turn for player '{}'",
+            if is_llm { "LLM" } else { "RULE_AI" },
+            state.active_player().map(|p| p.id.as_str()).unwrap_or("?"),
+        );
+
         let mut bus = EventBus::new();
         register_core_commands(&mut bus.command_handlers);
         register_core_tile_behaviors(&mut bus.tile_behaviors);
@@ -324,6 +344,138 @@ impl EngineBridge {
         };
 
         serde_json::to_string_pretty(&result).map_err(|err| err.to_string())
+    }
+
+    /// Handle `core:command:llm_context`: build structured context + text prompt
+    /// for an LLM player. The Flutter side sends these to an LLM API and
+    /// receives an `LlmDecision` JSON back.
+    fn handle_llm_context(request: BridgeRequest) -> Result<String, String> {
+        use crate::llm_player::{build_llm_context, build_llm_prompt};
+
+        let state: GameState = serde_json::from_value(request.state.clone())
+            .map_err(|e| format!("Invalid state: {e}"))?;
+
+        let player_id = request.payload["player_id"]
+            .as_str()
+            .or_else(|| state.active_player().map(|p| p.id.as_str()))
+            .unwrap_or("");
+
+        // Parse optional event_log from the request payload
+        let event_log: Vec<String> = request.payload["event_log"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+
+        log::info!("[LLM_CONTEXT] Built context for player '{}' ({} events)", player_id, event_log.len());
+
+        let last_action = request.payload["last_action"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        let ctx = build_llm_context(&state, player_id, event_log, last_action);
+        let prompt = build_llm_prompt(&ctx);
+
+        let result = serde_json::json!({
+            "context": ctx,
+            "prompt": prompt,
+            "player_id": player_id,
+        });
+
+        serde_json::to_string_pretty(&result).map_err(|err| err.to_string())
+    }
+
+    /// Handle `core:command:llm_decide`: build authoritative context from the
+    /// supplied GameState, call the configured backend, and return a validated
+    /// decision. Flutter supplies only player/config/log metadata; it never
+    /// supplies or mutates the structured game context.
+    fn handle_llm_decide(request: BridgeRequest) -> Result<String, String> {
+        use crate::llm_backend::{call_llm_backend, LlmBackendConfig};
+        use crate::llm_player::{build_llm_context, build_llm_prompt};
+
+        let player_id = request.payload["player_id"]
+            .as_str()
+            .ok_or_else(|| "Missing LLM player_id".to_string())?;
+        let request_id = request.payload["request_id"]
+            .as_str()
+            .ok_or_else(|| "Missing LLM request_id".to_string())?;
+        let state: GameState = serde_json::from_value(request.state.clone())
+            .map_err(|e| format!("Invalid state: {e}"))?;
+        let active_player = state
+            .active_player()
+            .ok_or_else(|| "Game state has no active player".to_string())?;
+        if active_player.id != player_id {
+            return Err(format!(
+                "LLM player '{player_id}' is not the active player '{}'",
+                active_player.id
+            ));
+        }
+        if !active_player.is_llm_controlled {
+            return Err(format!("Player '{player_id}' is not LLM-controlled"));
+        }
+        let event_log: Vec<String> = request.payload["event_log"]
+            .as_array()
+            .map(|items| {
+                items.iter()
+                    .filter_map(|value| value.as_str().map(String::from))
+                    .take(20)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let last_action = request.payload["last_action"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        let context = build_llm_context(&state, player_id, event_log, last_action);
+        let context_value = serde_json::to_value(&context)
+            .map_err(|e| format!("Failed to serialize LLM context: {e}"))?;
+        let prompt = build_llm_prompt(&context);
+        let cfg_raw = &request.payload["config"];
+
+        let config = LlmBackendConfig {
+            backend: cfg_raw["backend"].as_str().unwrap_or("direct").to_string(),
+            endpoint: cfg_raw["api_endpoint"].as_str().unwrap_or("").to_string(),
+            a2cm_endpoint: cfg_raw["a2cm_endpoint"].as_str().unwrap_or("").to_string(),
+            api_key: cfg_raw["api_key"].as_str().unwrap_or("").to_string(),
+            model: cfg_raw["model"].as_str().unwrap_or("gpt-4").to_string(),
+            temperature: cfg_raw["temperature"].as_f64().unwrap_or(0.7),
+            max_tokens: cfg_raw["max_tokens"].as_u64().unwrap_or(512) as u32,
+            custom_headers: cfg_raw["custom_headers"].as_str().unwrap_or("").to_string(),
+        };
+
+        let decision = call_llm_backend(
+            &prompt,
+            &context_value,
+            player_id,
+            request_id,
+            &config,
+        )
+            .map_err(|e| format!("LLM decide failed: {e}"))?;
+
+        serde_json::to_string_pretty(&decision).map_err(|err| err.to_string())
+    }
+
+    fn handle_llm_test_connection(request: BridgeRequest) -> Result<String, String> {
+        use crate::llm_backend::{test_a2cm_connection, LlmBackendConfig};
+
+        let cfg_raw = &request.payload["config"];
+        let config = LlmBackendConfig {
+            backend: "a2cm".to_string(),
+            endpoint: String::new(),
+            a2cm_endpoint: cfg_raw["a2cm_endpoint"].as_str().unwrap_or("").to_string(),
+            api_key: cfg_raw["api_key"].as_str().unwrap_or("").to_string(),
+            model: String::new(),
+            temperature: 0.0,
+            max_tokens: 0,
+            custom_headers: String::new(),
+        };
+        let capability = test_a2cm_connection(&config)?;
+        Ok(serde_json::json!({
+            "ok": true,
+            "service": capability["service"],
+            "game": capability["game"],
+            "protocol_version": capability["protocol_version"],
+            "llm_backend": capability["llm_backend"],
+        }).to_string())
     }
 
     /// Handle `core:command:create_game`: parse map JSON + players, construct GameState.

@@ -1,50 +1,39 @@
-// Smoke test for the saMonopoly Flutter app.
-//
-// Verifies that the app builds without errors and renders key UI components.
+// Smoke and unit tests for the saMonopoly Flutter app.
 
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:sa_monopoly/main.dart';
+import 'package:sa_monopoly/config_provider.dart';
 
 void main() {
-  testWidgets('App builds and renders the game screen',
-      (WidgetTester tester) async {
-    // Build the SaMonopolyApp and trigger a frame.
+  testWidgets('Home screen renders the main menu', (WidgetTester tester) async {
     await tester.pumpWidget(const SaMonopolyApp());
+    await tester.pump();
 
-    // The app bar should display the title.
+    // Title and the primary menu entry should be visible.
     expect(find.text('saMonopoly'), findsOneWidget);
-
-    // The settings icon button should be present in the app bar.
-    expect(find.byIcon(Icons.settings), findsOneWidget);
-
-    // Action buttons should be rendered.
-    expect(find.text('Roll'), findsOneWidget);
-    expect(find.text('End Turn'), findsOneWidget);
-
-    // Active player name should be visible (Player 1 is active by default).
-    expect(find.text('Player 1'), findsOneWidget);
+    expect(find.text('进入游戏'), findsOneWidget);
+    expect(find.text('设置'), findsOneWidget);
   });
 
-  testWidgets('Game can be restarted via settings dialog',
-      (WidgetTester tester) async {
-    await tester.pumpWidget(const SaMonopolyApp());
+  test('ConfigProvider reports failure when no engine is connected', () {
+    // Without a BridgeClient the config store is unavailable, so a save must
+    // fail rather than silently pretend to succeed.
+    final config = ConfigProvider();
+    final result = config.updateSettings(
+      game: const GameConfig(),
+      llmApi: const LlmApiConfig(),
+    );
+    expect(result.success, isFalse);
+    expect(result.error, isNotNull);
+  });
 
-    // Tap the settings icon.
-    await tester.tap(find.byIcon(Icons.settings));
-    await tester.pump();
-
-    // The settings dialog should appear.
-    expect(find.text('Game Settings'), findsOneWidget);
-    expect(find.text('Start Game'), findsOneWidget);
-
-    // Tap "Start Game" to restart with the same settings.
-    await tester.tap(find.text('Start Game'));
-    await tester.pump();
-
-    // After restarting, the game board should still be visible.
-    expect(find.text('saMonopoly'), findsOneWidget);
-    expect(find.text('Roll'), findsOneWidget);
+  test('ConfigSaveResult exposes success and failure states', () {
+    const ok = ConfigSaveResult.success();
+    const bad = ConfigSaveResult.failure('boom');
+    expect(ok.success, isTrue);
+    expect(ok.error, isNull);
+    expect(bad.success, isFalse);
+    expect(bad.error, 'boom');
   });
 }

@@ -457,9 +457,60 @@ pub unsafe extern "C" fn sa_engine_config_save(input: *const c_char) -> *mut c_c
         return error_json(&format!("Invalid config JSON: {e}"));
     }
 
-    match save_config_to_disk(input_str) {
+    // Move any plaintext LLM API key into the OS keychain, replacing it with a
+    // `keyring:` reference so the secret never lands in the on-disk config.
+    let sanitized = match scrub_llm_api_key(input_str) {
+        Ok(json) => json,
+        Err(e) => return error_json(&format!("Secret store failed: {e}")),
+    };
+
+    match save_config_to_disk(&sanitized) {
         Ok(_) => ok_json(),
         Err(e) => error_json(&format!("Config save failed: {e}")),
+    }
+}
+
+/// Stable keychain id for the LLM API key.
+const LLM_API_KEY_ID: &str = "llm_api_key";
+
+/// Rewrite a ConfigDocument JSON string so `sections.llm_api.api_key` never
+/// contains a plaintext secret: literal keys are moved into the OS keychain and
+/// replaced with a `keyring:<id>` reference. Reference values (`keyring:` /
+/// `env:`) and empty keys are left unchanged.
+///
+/// If the keychain is unavailable the original document is returned so saving
+/// still succeeds; the plaintext fallback remains only when no secure store
+/// exists (e.g. headless environments).
+fn scrub_llm_api_key(config_json: &str) -> Result<String, String> {
+    use crate::secret_store;
+
+    let mut doc: serde_json::Value =
+        serde_json::from_str(config_json).map_err(|e| format!("Parse config: {e}"))?;
+
+    let api_key = doc
+        .get("sections")
+        .and_then(|s| s.get("llm_api"))
+        .and_then(|l| l.get("api_key"))
+        .and_then(|k| k.as_str());
+
+    let api_key = match api_key {
+        Some(k) if !k.is_empty() && !secret_store::is_reference(k) => k.to_string(),
+        // Empty or already a reference — nothing to move.
+        _ => return Ok(config_json.to_string()),
+    };
+
+    match secret_store::store_secret(LLM_API_KEY_ID, &api_key) {
+        Ok(reference) => {
+            doc["sections"]["llm_api"]["api_key"] =
+                serde_json::Value::String(reference);
+            serde_json::to_string(&doc).map_err(|e| format!("Serialize config: {e}"))
+        }
+        Err(e) => {
+            // Keychain unavailable: keep the original document (plaintext
+            // fallback) rather than blocking the save entirely.
+            log::warn!("[secret_store] keychain unavailable, storing key inline: {e}");
+            Ok(config_json.to_string())
+        }
     }
 }
 

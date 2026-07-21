@@ -4,6 +4,7 @@ import 'main.dart' show GameScreen;
 import 'map_manager_screen.dart';
 import 'map_selection_screen.dart';
 import 'plugin_manager_screen.dart';
+import 'settings_screen.dart';
 import 'save_manager.dart';
 
 // ============================================================================
@@ -251,21 +252,9 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _onSettings(BuildContext context) {
-    _showComingSoon(context, '设置');
-  }
-
-  void _showComingSoon(BuildContext context, String feature) {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(feature),
-        content: const Text('此功能正在开发中，敬请期待！'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('好的'),
-          ),
-        ],
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => const SettingsScreen(),
       ),
     );
   }

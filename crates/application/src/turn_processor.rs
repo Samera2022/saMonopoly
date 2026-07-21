@@ -185,10 +185,10 @@ impl StrategicAiDecisionMaker {
             .map(|p| p.cash)
             .unwrap_or(0);
 
-        let affordability_penalty = if cash < price + 200 {
+        let affordability_penalty = if cash < price + 100 {
+            -50 // Very tight — checked first (stricter condition)
+        } else if cash < price + 200 {
             -30 // Tight on cash
-        } else if cash < price + 100 {
-            -50 // Very tight
         } else {
             0
         };
@@ -441,7 +441,9 @@ impl StrategicAiDecisionMaker {
                 .count();
             let group_size = group.len() + 1; // +1 for this property
 
-            if owned_in_group >= 1 && group_size <= 3 {
+            // Own more than half of the group members (excluding self)
+            let owns_majority = owned_in_group * 2 > group.len();
+            if owns_majority && group_size <= 3 {
                 // Close to completing a small group
                 let remaining_cost: i64 = group.iter()
                     .filter(|tid| {
@@ -509,13 +511,12 @@ impl StrategicAiDecisionMaker {
         let score = Self::score_property(state, tile_id, player_id);
 
         // Dynamic threshold based on cash position.
-        // Lower thresholds = more aggressive buying.
         let threshold = if cash > 1000 {
-            20 // Early game (>$1000): buy almost everything
+            40 // Early game (>$1000): buy most things
         } else if cash > 500 {
-            40 // Mid game ($500-$1000): moderate selectivity
+            55 // Mid game ($500-$1000): moderate selectivity
         } else {
-            60 // Late game (<$500): only buy premium properties
+            70 // Late game (<$500): only buy premium properties
         };
 
         if score >= threshold {
@@ -640,6 +641,12 @@ impl DecisionMaker for StrategicAiDecisionMaker {
             return PlayerDecision::Pass;
         }
 
+        // Check max upgrade level
+        let next_level = property.upgrade_level + 1;
+        if next_level > state.max_upgrade_level as u32 {
+            return PlayerDecision::Pass;
+        }
+
         // Even building: only upgrade if this is the lowest-level property in the group
         let min_level = group.iter()
             .filter_map(|tid| state.board.property(tid))
@@ -712,20 +719,10 @@ impl TurnProcessor {
         };
         bus.execute_command(roll_cmd, state, rng);
 
-        // NOTE: Buying property is NOT done here — it happens as a separate FFI
-        // call from Flutter's _processAiTurn() after the movement animation
-        // completes.  This ensures the ownership indicator does not change
-        // before the chess piece arrives at the tile.
-
-        // Phase 2: End turn
-        let end_cmd = AnyEvent::Custom {
-            category: "game".to_string(),
-            event_type: "core:command:end_turn".to_string(),
-            source: "core".to_string(),
-            payload: serde_json::json!({ "player_id": player_id }),
-            timestamp: 0,
-        };
-        bus.execute_command(end_cmd, state, rng);
+        // NOTE: end_turn is NOT called here — Flutter handles it after
+        // the AI/LLM finishes its post-movement decisions (buy, upgrade,
+        // etc.).  This ensures the AI is still the active player when
+        // making purchases.
     }
 }
 

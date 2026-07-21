@@ -9,6 +9,7 @@ import 'network_service.dart' show NetworkService;
 
 import 'config_provider.dart' show ConfigProvider, GameConfig, NetworkConfig;
 import 'main.dart' show GameScreen;
+import 'bridge_client.dart';
 import 'map_models.dart' show MapMeta, MapPluginRef;
 import 'plugin_models.dart' show PluginSyncEntry, PluginAckMessage;
 import 'plugin_state.dart';
@@ -80,7 +81,10 @@ class GameLobbyScreen extends StatefulWidget {
 }
 
 class _GameLobbyScreenState extends State<GameLobbyScreen> {
-  final ConfigProvider _configProvider = ConfigProvider();
+  // BridgeClient for config persistence — must pass to ConfigProvider
+  // so that settings saved from the home page are visible in the lobby.
+  final BridgeClient _bridgeClient = BridgeClient();
+  final ConfigProvider _configProvider = ConfigProvider(client: BridgeClient());
   final List<String> _systemMessages = [
     '请设置玩家和规则，然后开始游戏',
   ];
@@ -699,6 +703,27 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
 
   // ── Actions ───────────────────────────────────────────────────────────────
 
+  bool _validateGameConfig() {
+    final checks = <String, int?>{
+      '起始资金': int.tryParse(_startCashCtrl.text),
+      '经过奖金': int.tryParse(_passBonusCtrl.text),
+      '监狱回合': int.tryParse(_jailTurnsCtrl.text),
+      '医院回合': int.tryParse(_hospitalTurnsCtrl.text),
+      '升级等级': int.tryParse(_maxUpgradeCtrl.text),
+    };
+    for (final entry in checks.entries) {
+      final v = entry.value;
+      if (v == null || v < 0) {
+        if (!mounted) return false;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${entry.key} 无效，请检查输入')),
+        );
+        return false;
+      }
+    }
+    return true;
+  }
+
   void _saveConfig() {
     _configProvider.updateGame(GameConfig(
       startingCash: int.tryParse(_startCashCtrl.text) ?? CommandConstants.startingCash,
@@ -719,6 +744,7 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
 
   void _onStartGame() {
     if (!_canStartGame) return;
+    if (!_validateGameConfig()) return;
     _saveConfig();
 
     final names = _slots
@@ -749,6 +775,7 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
             initialPlayerCount: count,
             playerNames: names,
             aiFlags: aiFlags,
+            llmFlags: llmFlags,
             teamIds: teamIds,
             mapId: widget.mapId,
             networkService: networkService,
@@ -793,6 +820,7 @@ class _GameLobbyScreenState extends State<GameLobbyScreen> {
             initialPlayerCount: count,
             playerNames: names,
             aiFlags: aiFlags,
+            llmFlags: llmFlags,
             teamIds: teamIds,
             mapId: widget.mapId,
           ),

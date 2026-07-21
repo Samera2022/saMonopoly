@@ -1,14 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show rootBundle;
+import 'package:flutter/services.dart';
 
 import 'board_view.dart';
 import 'home_screen.dart';
 import 'network_service.dart';
-import 'save_manager.dart';
 import 'save_manager.dart';
 import 'bridge_client.dart';
 import 'card_inventory_dialog.dart';
@@ -250,8 +248,8 @@ class _GameScreenState extends State<GameScreen> {
   /// Ensures dice values remain visible until the turn advances.
   Map<String, int> _lastDiceResult = {};
 
-  // ---- Config provider -----------------------------------------------------
-  final ConfigProvider _configProvider = ConfigProvider();
+  // ---- Config provider (with BridgeClient for LLM API config persistence) ----
+  final ConfigProvider _configProvider = ConfigProvider(client: BridgeClient());
 
   // ---- Turn state ----------------------------------------------------------
   /// Number of rolls remaining for the current active player this turn.
@@ -1474,14 +1472,18 @@ class _GameScreenState extends State<GameScreen> {
     // process_ai_turn advances active_player_index to the next player.
     // If we rely on auto-injection of player_id after the turn, we'll
     // get the NEXT player's ID instead of the current AI's ID.
+    // Also save whether this is an LLM player — the active-player LLM flag
+    // will be WRONG after process_ai_turn advances active_player_index.
     String? aiPlayerId;
     String? aiPlayerPosBefore;
+    bool aiIsLlm = false;
     final playersBefore = (_currentState['players'] as List<dynamic>?) ?? [];
     final idxBefore = (_currentState['active_player_index'] as num?)?.toInt() ?? 0;
     if (idxBefore < playersBefore.length) {
       final p = playersBefore[idxBefore] as Map<String, dynamic>?;
       aiPlayerId = p?['id'] as String?;
       aiPlayerPosBefore = p?['position'] as String?;
+      aiIsLlm = p?['is_llm_controlled'] == true;
     }
 
     final response = await _bridgeClient.executeCommand(
@@ -1595,77 +1597,213 @@ class _GameScreenState extends State<GameScreen> {
     //   uiAction.execute();
     // }
 
-    // ═══ AI: strategic buy/upgrade after movement animation ═════
-    // The Rust TurnProcessor does NOT buy properties during the turn.
-    // We consult the strategic AI engine (core:command:ai_evaluate)
-    // in Rust, then execute the recommended actions here.
+    // Helper: send end_turn
+    Future<void> _sendEndTurn(String? pid) async {
+      final endResp = await _bridgeClient.executeCommand(
+        command: BridgeCommand(
+          type: 'core:command:end_turn',
+          params: {'player_id': pid ?? aiPlayerId ?? ''},
+        ),
+        currentState: _currentState,
+      );
+      final endResult = EventDispatcher.dispatch(response: endResp);
+      for (final log in endResult.logs) { _addLog(log); }
+      setState(() {
+        _currentState = endResp.state;
+        _gameState = _buildGameState(endResp.state, lastEvent: endResult.lastLog);
+      });
+    }
+
+    // ═══ AI/LLM: post-movement decisions ══════════════════════════
+    // TurnProcessor only does roll (no end_turn). Both AI and LLM
+    // must explicitly send end_turn when done.
+    _addLog(aiIsLlm ? '[LLM] LLM 玩家回合' : '[AI] 规则AI回合');
+
     try {
-      // Use the AI player's ID saved BEFORE the turn was processed.
-      // We can't rely on _gameState.activePlayerIndex or _currentState
-      // because process_ai_turn advanced the turn to the next player.
-      final pos = aiPlayerPosBefore ?? '';
+      // Use the player's position AFTER the roll (from response state),
+      // not aiPlayerPosBefore which is the position before the roll.
+      String pos = aiPlayerPosBefore ?? '';
+      final responsePlayers = response.state['players'] as List<dynamic>?;
+      final activeIdx = (response.state['active_player_index'] as num?)?.toInt() ?? 0;
+      if (responsePlayers != null && activeIdx < responsePlayers.length) {
+        final p = responsePlayers[activeIdx] as Map<String, dynamic>?;
+        pos = p?['position'] as String? ?? pos;
+      }
 
-      if (pos.isNotEmpty) {
-        // ── Step 1: Evaluate whether to buy the landed property ──
-        final buyEval = await _bridgeClient.evaluateAi(
-          action: 'buy',
-          tileId: pos,
-          playerId: aiPlayerId,
-          currentState: _currentState,
-        );
+      if (aiIsLlm) {
+        // ══ LLM 路径：循环直到 LLM 输出 end_turn ═════════════════
+        _addLog('[LLM] LLM 玩家决策中...');
+        bool turnEnded = false;
+        const maxDecisions = 10; // safety limit
+        int maxIterations = maxDecisions;
+        // 记录 bot 本回合已执行的上一步，传回下一次决策，避免重复行动。
+        String? lastActionThisTurn;
 
-        if (buyEval['decision'] == 'buy') {
-          // Pass player_id explicitly — auto-injection would use the
-          // advanced active_player_index and buy for the wrong player.
-          final buyResp = await _bridgeClient.executeCommand(
-            command: BridgeCommand(
-              type: 'core:command:buy_property',
-              params: {'tile_id': pos, 'player_id': aiPlayerId},
-            ),
+        while (!turnEnded && maxIterations > 0) {
+          maxIterations--;
+          try {
+            // 1. 收集近期事件日志（最近20条）
+            final recentLogs = _gameState.eventLog
+                .take(20)
+                .map((e) => e.message)
+                .toList();
+
+            // 2. 通过 Rust 引擎构建权威上下文并调用 LLM backend。
+            //    Rust 端处理 GameState、prompt、API Key 和 HTTP 调用，
+            //    Flutter 只传玩家 ID、近期日志和连接配置。
+            //    llm_decide 返回的是原始 LlmDecision JSON（不是 BridgeResponse）。
+            //    每次调用前重新加载配置，确保主页设置修改已生效。
+            final reload = _configProvider.reloadLlmApi();
+            if (!reload.success) {
+              _addLog('[LLM] 配置加载失败: ${reload.error}，结束回合');
+              await _sendEndTurn(aiPlayerId);
+              turnEnded = true;
+              break;
+            }
+            final cfg = _configProvider.llmApi;
+            final decidePayload = {
+              'command_type': 'core:command:llm_decide',
+              'source': 'core',
+              'payload': {
+                'player_id': aiPlayerId,
+                'request_id':
+                    'turn-${_gameState.currentTurn}-$aiPlayerId-${maxDecisions - maxIterations}',
+                'event_log': recentLogs,
+                if (lastActionThisTurn != null) 'last_action': lastActionThisTurn,
+                'config': {
+                  'backend': cfg.backend,
+                  'api_endpoint': cfg.apiEndpoint,
+                  'a2cm_endpoint': cfg.a2cmEndpoint,
+                  'api_key': cfg.apiKey,
+                  'model': cfg.model,
+                  'temperature': cfg.temperature,
+                  'max_tokens': cfg.maxTokens,
+                  'custom_headers': cfg.customHeaders,
+                },
+              },
+              'state': _currentState,
+            };
+            final decideJsonStr = jsonEncode(decidePayload);
+            final decideRaw = _bridgeClient.engine.execute(decideJsonStr);
+            if (decideRaw == null) {
+              throw Exception('Rust engine returned null');
+            }
+            final decisionJson = jsonDecode(decideRaw) as Map<String, dynamic>;
+            if (decisionJson.containsKey('error')) {
+              throw Exception(decisionJson['error']);
+            }
+            final cmd = decisionJson['command'] as String? ?? 'end_turn';
+            final rationale = decisionJson['rationale'] as String? ?? '';
+            final commentary = decisionJson['commentary'] as String? ?? '';
+
+            // 4. 日志
+            _addLog('[LLM] 决策: $cmd — $rationale');
+            if (commentary.isNotEmpty) {
+              _addLog('[LLM] 💬 $commentary');
+            }
+
+            // 5. 执行或结束
+            if (cmd == 'end_turn') {
+              _addLog('[LLM] 结束回合');
+              await _sendEndTurn(aiPlayerId);
+              turnEnded = true;
+            } else {
+              // 构建命令参数：合并 payload 和 player_id
+              final payload = (decisionJson['payload'] as Map<String, dynamic>?) ?? {};
+              final execResp = await _bridgeClient.executeCommand(
+                command: BridgeCommand(
+                  type: 'core:command:$cmd',
+                  params: {
+                    ...payload,
+                    'player_id': aiPlayerId ?? '',
+                  },
+                ),
+                currentState: _currentState,
+              );
+              final execResult = EventDispatcher.dispatch(response: execResp);
+              for (final log in execResult.logs) { _addLog(log); }
+              setState(() {
+                _currentState = execResp.state;
+                _gameState = _buildGameState(
+                  execResp.state, lastEvent: execResult.lastLog,
+                );
+              });
+              // 记录这一步，供下一次决策参考，避免重复。
+              final payloadDesc = payload.isEmpty ? '' : ' $payload';
+              lastActionThisTurn = '$cmd$payloadDesc';
+            }
+          } catch (e) {
+            _addLog('[LLM] API 调用失败: $e，结束回合');
+            await _sendEndTurn(aiPlayerId);
+            turnEnded = true;
+          }
+        }
+        // 安全兜底：若达到迭代上限仍未结束回合，强制结束，
+        // 否则活动玩家不会推进，会导致回合停滞或重复行动。
+        if (!turnEnded) {
+          _addLog('[LLM] 达到决策上限，强制结束回合');
+          await _sendEndTurn(aiPlayerId);
+        }
+      } else {
+        // ══ 规则AI路径：决策后明确结束回合 ══════════════════════
+        if (pos.isNotEmpty) {
+          // ── 购买评估 ─────────────────────────────────────────
+          final buyEval = await _bridgeClient.evaluateAi(
+            action: 'buy',
+            tileId: pos,
+            playerId: aiPlayerId,
             currentState: _currentState,
           );
-          final buyResult = EventDispatcher.dispatch(response: buyResp);
-          for (final log in buyResult.logs) { _addLog(log); }
-          setState(() {
-            _currentState = buyResp.state;
-            _gameState = _buildGameState(
-              buyResp.state,
-              lastEvent: buyResult.lastLog,
+          if (buyEval['decision'] == 'buy') {
+            final buyResp = await _bridgeClient.executeCommand(
+              command: BridgeCommand(
+                type: 'core:command:buy_property',
+                params: {'tile_id': pos, 'player_id': aiPlayerId},
+              ),
+              currentState: _currentState,
             );
-          });
-        } else {
-          // Log the strategic decision to skip
-          final score = buyEval['score'] as num? ?? 0;
-          _addLog('[AI] Skipped property (score: $score) — strategic pass');
-        }
+            final buyResult = EventDispatcher.dispatch(response: buyResp);
+            for (final log in buyResult.logs) { _addLog(log); }
+            setState(() {
+              _currentState = buyResp.state;
+              _gameState = _buildGameState(
+                buyResp.state, lastEvent: buyResult.lastLog,
+              );
+            });
+          } else {
+            final score = buyEval['score'] as num? ?? 0;
+            _addLog('[AI] 跳过购买 (评分: $score)');
+          }
 
-        // ── Step 2: Evaluate upgrade target ─────────────────────
-        // After potentially buying, check if any property should be upgraded.
-        final upgradeEval = await _bridgeClient.evaluateAi(
-          action: 'upgrade_target',
-          currentState: _currentState,
-        );
-
-        final target = upgradeEval['target'] as String?;
-        if (target != null && target.isNotEmpty) {
-          final upgradeResp = await _bridgeClient.executeCommand(
-            command: BridgeCommand.upgradeProperty(target),
+          // ── 升级评估 ─────────────────────────────────────────
+          final upgradeEval = await _bridgeClient.evaluateAi(
+            action: 'upgrade_target',
             currentState: _currentState,
           );
-          final upgradeResult = EventDispatcher.dispatch(response: upgradeResp);
-          for (final log in upgradeResult.logs) { _addLog(log); }
-          setState(() {
-            _currentState = upgradeResp.state;
-            _gameState = _buildGameState(
-              upgradeResp.state,
-              lastEvent: upgradeResult.lastLog,
+          final target = upgradeEval['target'] as String?;
+          if (target != null && target.isNotEmpty) {
+            final upgradeResp = await _bridgeClient.executeCommand(
+              command: BridgeCommand.upgradeProperty(target),
+              currentState: _currentState,
             );
-          });
+            final upgradeResult = EventDispatcher.dispatch(response: upgradeResp);
+            for (final log in upgradeResult.logs) { _addLog(log); }
+            setState(() {
+              _currentState = upgradeResp.state;
+              _gameState = _buildGameState(
+                upgradeResp.state, lastEvent: upgradeResult.lastLog,
+              );
+            });
+          }
         }
+        // ── 规则AI结束回合 ─────────────────────────────────────
+        await _sendEndTurn(aiPlayerId);
       }
     } catch (e) {
-      debugPrint('[AI] Strategic evaluation error: $e');
-      // Fall back: state unchanged, continue
+      debugPrint('[AI] Decision error: $e');
+      _addLog('[AI] 决策异常: $e');
+      // Always send end_turn on error to prevent infinite recursion
+      try { await _sendEndTurn(aiPlayerId); } catch (_) {}
     }
     // ═════════════════════════════════════════════════════════════
 
@@ -2128,15 +2266,66 @@ class _GameScreenState extends State<GameScreen> {
   // (Replaced by _showCardShopDialog above)
 
   void _showSettingsDialog() {
+    final state = _currentState;
+    final players = (state['players'] as List<dynamic>?) ?? [];
+    final rules = state['ruleset'] as Map<String, dynamic>? ?? {};
+    final maxUpgrade = state['max_upgrade_level'] as num? ?? 3;
+    final groupRent = state['group_rent_enabled'] as bool? ?? false;
+
     showDialog(
       context: context,
-      builder: (ctx) => _GameSettingsDialog(
-        configProvider: _configProvider,
-        initialPlayerCount: _gameState.numPlayers,
-        onStart: (count, playerNames, aiFlags) {
-          Navigator.of(ctx).pop();
-          _restartGame(count, playerNames, aiFlags);
-        },
+      builder: (ctx) => AlertDialog(
+        title: const Text('游戏信息'),
+        content: SizedBox(
+          width: 320,
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              _infoRow('玩家数量', '${players.length}'),
+              _infoRow('规则集', '${rules['id'] ?? "classic"}'),
+              _infoRow('当前回合', '${state['current_turn'] ?? 0}'),
+              _infoRow('最高升级等级', '$maxUpgrade'),
+              _infoRow('连带租金', groupRent ? '已启用' : '已禁用'),
+              const Divider(),
+              const Text('玩家列表:', style: TextStyle(fontWeight: FontWeight.bold)),
+              ...players.map((p) {
+                final pm = p as Map<String, dynamic>;
+                final type = pm['is_llm_controlled'] == true ? 'LLM'
+                    : pm['is_ai'] == true ? 'AI'
+                    : '人类';
+                return Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text('${pm['name']} ($type) — \$${pm['cash']}'),
+                );
+              }),
+              if (state['lottery_state'] != null) ...[
+                const Divider(),
+                const Text('彩票系统: 已启用'),
+              ],
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _infoRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 120,
+            child: Text(label, style: const TextStyle(fontWeight: FontWeight.w500)),
+          ),
+          Expanded(child: Text(value)),
+        ],
       ),
     );
   }
@@ -2365,13 +2554,13 @@ class _GameScreenState extends State<GameScreen> {
                     ),
                     const Divider(height: 1),
                     // Event log
-                    Expanded(
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 8),
-                        child: _buildEventLog(),
-                      ),
-                    ),
-                  ],
+                     Expanded(
+                       child: Padding(
+                         padding: const EdgeInsets.symmetric(horizontal: 8),
+                         child: _buildEventLog(),
+                       ),
+                     ),
+                   ],
                 ),
               ),
             ],
@@ -2679,450 +2868,3 @@ class _GameScreenState extends State<GameScreen> {
     );
   }
 }
-
-// ============================================================================
-// Game settings dialog
-// ============================================================================
-
-class _GameSettingsDialog extends StatefulWidget {
-  final ConfigProvider configProvider;
-  final int initialPlayerCount;
-  final void Function(
-      int count, List<String> names, List<bool> aiFlags) onStart;
-
-  const _GameSettingsDialog({
-    required this.configProvider,
-    required this.initialPlayerCount,
-    required this.onStart,
-  });
-
-  @override
-  State<_GameSettingsDialog> createState() => _GameSettingsDialogState();
-}
-
-class _GameSettingsDialogState extends State<_GameSettingsDialog>
-    with SingleTickerProviderStateMixin {
-  late int _playerCount;
-  late List<TextEditingController> _nameControllers;
-  late List<bool> _aiFlags;
-  late TabController _tabController;
-
-  // ── App config controllers ───────────────────────────────────────────────
-  late TextEditingController _languageCtrl;
-  late TextEditingController _themeCtrl;
-
-  // ── Game config controllers ──────────────────────────────────────────────
-  late TextEditingController _startCashCtrl;
-  late TextEditingController _maxPlayersCtrl;
-  late TextEditingController _passBonusCtrl;
-  late TextEditingController _jailTurnsCtrl;
-  late TextEditingController _hospitalTurnsCtrl;
-  late TextEditingController _maxUpgradeCtrl;
-  bool _extensionUpgradeEnabled = true;
-  bool _groupRentEnabled = true;
-  bool _stockMarketEnabled = true;
-  bool _lotteryEnabled = true;
-  bool _auctionEnabled = true;
-  bool _mortgageEnabled = true;
-  bool _tradeEnabled = true;
-
-  // ── Network config controllers ───────────────────────────────────────────
-  late TextEditingController _hostCtrl;
-  late TextEditingController _portCtrl;
-  bool _tlsEnabled = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _tabController = TabController(length: 3, vsync: this);
-
-    final app = widget.configProvider.app;
-    final game = widget.configProvider.game;
-    final network = widget.configProvider.network;
-
-    _playerCount = widget.initialPlayerCount;
-    _nameControllers = List.generate(
-      _playerCount,
-      (i) => TextEditingController(text: 'Player ${i + 1}'),
-    );
-    _aiFlags = List.generate(
-      _playerCount,
-      (i) => i > 0,
-    );
-
-    _languageCtrl = TextEditingController(text: app.language);
-    _themeCtrl = TextEditingController(text: app.theme);
-    _startCashCtrl =
-        TextEditingController(text: game.startingCash.toString());
-    _maxPlayersCtrl =
-        TextEditingController(text: game.maxPlayers.toString());
-    _passBonusCtrl =
-        TextEditingController(text: game.passStartBonus.toString());
-    _jailTurnsCtrl =
-        TextEditingController(text: game.jailEscapeTurns.toString());
-    _hospitalTurnsCtrl =
-        TextEditingController(text: game.hospitalRecoveryTurns.toString());
-    _maxUpgradeCtrl =
-        TextEditingController(text: game.maxUpgradeLevel.toString());
-    _extensionUpgradeEnabled = game.extensionUpgradeEnabled;
-    _groupRentEnabled = game.groupRentEnabled;
-    _stockMarketEnabled = game.stockMarketEnabled;
-    _lotteryEnabled = game.lotteryEnabled;
-    _auctionEnabled = game.auctionEnabled;
-    _mortgageEnabled = game.mortgageEnabled;
-    _tradeEnabled = game.tradeEnabled;
-    _hostCtrl = TextEditingController(text: network.host);
-    _portCtrl = TextEditingController(text: network.port.toString());
-    _tlsEnabled = network.tls;
-  }
-
-  @override
-  void dispose() {
-    _tabController.dispose();
-    for (final c in _nameControllers) {
-      c.dispose();
-    }
-    _languageCtrl.dispose();
-    _themeCtrl.dispose();
-    _startCashCtrl.dispose();
-    _maxPlayersCtrl.dispose();
-    _passBonusCtrl.dispose();
-    _jailTurnsCtrl.dispose();
-    _hospitalTurnsCtrl.dispose();
-    _maxUpgradeCtrl.dispose();
-    _hostCtrl.dispose();
-    _portCtrl.dispose();
-    super.dispose();
-  }
-
-  void _updatePlayerCount(int count) {
-    setState(() {
-      if (count > _playerCount) {
-        for (var i = _playerCount; i < count; i++) {
-          _nameControllers.add(TextEditingController(text: 'Player ${i + 1}'));
-          _aiFlags.add(true);
-        }
-      } else if (count < _playerCount) {
-        for (var i = _playerCount - 1; i >= count; i--) {
-          _nameControllers[i].dispose();
-          _nameControllers.removeAt(i);
-          _aiFlags.removeAt(i);
-        }
-      }
-      _playerCount = count;
-    });
-  }
-
-  void _saveConfig() {
-    widget.configProvider.updateApp(AppConfig(
-      language: _languageCtrl.text,
-      theme: _themeCtrl.text,
-    ));
-    widget.configProvider.updateGame(GameConfig(
-      startingCash: int.tryParse(_startCashCtrl.text) ?? CommandConstants.startingCash,
-      maxPlayers: int.tryParse(_maxPlayersCtrl.text) ?? CommandConstants.maxPlayers,
-      passStartBonus: int.tryParse(_passBonusCtrl.text) ?? CommandConstants.passStartBonus,
-      jailEscapeTurns: int.tryParse(_jailTurnsCtrl.text) ?? GameDefaults.baseJailTurns,
-      hospitalRecoveryTurns: int.tryParse(_hospitalTurnsCtrl.text) ?? CommandConstants.hospitalRecoveryTurns,
-      maxUpgradeLevel: int.tryParse(_maxUpgradeCtrl.text) ?? GameDefaults.maxUpgradeLevel,
-      extensionUpgradeEnabled: _extensionUpgradeEnabled,
-      groupRentEnabled: _groupRentEnabled,
-      stockMarketEnabled: _stockMarketEnabled,
-      lotteryEnabled: _lotteryEnabled,
-      auctionEnabled: _auctionEnabled,
-      mortgageEnabled: _mortgageEnabled,
-      tradeEnabled: _tradeEnabled,
-    ));
-    widget.configProvider.updateNetwork(NetworkConfig(
-      host: _hostCtrl.text,
-      port: int.tryParse(_portCtrl.text) ?? 9000,
-      tls: _tlsEnabled,
-    ));
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('Settings'),
-      content: SizedBox(
-        width: 380,
-        height: 440,
-        child: Column(
-          children: [
-            TabBar(
-              controller: _tabController,
-              tabs: const [
-                Tab(text: 'Players'),
-                Tab(text: 'Rules'),
-                Tab(text: 'Network'),
-              ],
-            ),
-            Expanded(
-              child: TabBarView(
-                controller: _tabController,
-                children: [
-                  // ── Tab 1: Players ─────────────────────────────────────
-                  _buildPlayersTab(),
-                  // ── Tab 2: Game Rules ──────────────────────────────────
-                  _buildRulesTab(),
-                  // ── Tab 3: Network ─────────────────────────────────────
-                  _buildNetworkTab(),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          onPressed: () {
-            _saveConfig();
-            widget.onStart(
-              _playerCount,
-              _nameControllers.map((c) => c.text).toList(),
-              _aiFlags,
-            );
-          },
-          child: const Text('Start Game'),
-        ),
-      ],
-    );
-  }
-
-  // ── Tab builders ─────────────────────────────────────────────────────────
-
-  Widget _buildPlayersTab() {
-    return ListView(
-      children: [
-        // Player count
-        Row(
-          children: [
-            const Text('Players:'),
-            const Spacer(),
-            IconButton(
-              onPressed: _playerCount > 2
-                  ? () => _updatePlayerCount(_playerCount - 1)
-                  : null,
-              icon: const Icon(Icons.remove_circle_outline),
-            ),
-            Text(
-              '$_playerCount',
-              style: const TextStyle(
-                fontSize: 20,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            IconButton(
-              onPressed: _playerCount < CommandConstants.maxPlayers
-                  ? () => _updatePlayerCount(_playerCount + 1)
-                  : null,
-              icon: const Icon(Icons.add_circle_outline),
-            ),
-          ],
-        ),
-        const Divider(),
-        for (var i = 0; i < _playerCount; i++) ...[
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(8.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      CircleAvatar(
-                        backgroundColor:
-                            _playerColors[i % _playerColors.length],
-                        radius: 12,
-                        child: Text(
-                          '${i + 1}',
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: TextField(
-                          controller: _nameControllers[i],
-                          decoration: const InputDecoration(
-                            labelText: 'Name',
-                            isDense: true,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  SwitchListTile(
-                    title: const Text('AI Player'),
-                    subtitle: Text(
-                        _aiFlags[i] ? 'Computer controlled' : 'Human'),
-                    value: _aiFlags[i],
-                    dense: true,
-                    contentPadding: EdgeInsets.zero,
-                    onChanged: (v) => setState(() => _aiFlags[i] = v),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: 4),
-        ],
-      ],
-    );
-  }
-
-  Widget _buildRulesTab() {
-    return ListView(
-      children: [
-        TextField(
-          controller: _startCashCtrl,
-          decoration: const InputDecoration(
-            labelText: 'Starting Cash (\$)',
-            isDense: true,
-          ),
-          keyboardType: TextInputType.number,
-        ),
-        const SizedBox(height: 12),
-        TextField(
-          controller: _passBonusCtrl,
-          decoration: const InputDecoration(
-            labelText: 'Pass Start Bonus (\$)',
-            isDense: true,
-          ),
-          keyboardType: TextInputType.number,
-        ),
-        const SizedBox(height: 12),
-        TextField(
-          controller: _jailTurnsCtrl,
-          decoration: const InputDecoration(
-            labelText: 'Jail Turns',
-            isDense: true,
-          ),
-          keyboardType: TextInputType.number,
-        ),
-        const SizedBox(height: 12),
-        TextField(
-          controller: _hospitalTurnsCtrl,
-          decoration: const InputDecoration(
-            labelText: 'Hospital Turns',
-            isDense: true,
-          ),
-          keyboardType: TextInputType.number,
-        ),
-        const SizedBox(height: 12),
-        TextField(
-          controller: _maxUpgradeCtrl,
-          decoration: const InputDecoration(
-            labelText: 'Max Upgrade Level (0 = disabled)',
-            isDense: true,
-            helperText: 'Rent & cost calculated by formula',
-            helperMaxLines: 1,
-          ),
-          keyboardType: TextInputType.number,
-        ),
-        const SizedBox(height: 12),
-        SwitchListTile(
-          title: const Text('Utility Upgrades'),
-          subtitle: const Text('Allow upgrading Electric Co / Water Works'),
-          value: _extensionUpgradeEnabled,
-          dense: true,
-          contentPadding: EdgeInsets.zero,
-          onChanged: (v) => setState(() => _extensionUpgradeEnabled = v),
-        ),
-        const SizedBox(height: 4),
-        SwitchListTile(
-          title: const Text('Group Rent'),
-          subtitle: const Text('Sum rent when full group owned'),
-          value: _groupRentEnabled,
-          dense: true,
-          contentPadding: EdgeInsets.zero,
-          onChanged: (v) => setState(() => _groupRentEnabled = v),
-        ),
-        const SizedBox(height: 4),
-        SwitchListTile(
-          title: const Text('Stock Market'),
-          value: _stockMarketEnabled,
-          dense: true,
-          contentPadding: EdgeInsets.zero,
-          onChanged: (v) => setState(() => _stockMarketEnabled = v),
-        ),
-        SwitchListTile(
-          title: const Text('Lottery'),
-          value: _lotteryEnabled,
-          dense: true,
-          contentPadding: EdgeInsets.zero,
-          onChanged: (v) => setState(() => _lotteryEnabled = v),
-        ),
-        SwitchListTile(
-          title: const Text('Auctions'),
-          value: _auctionEnabled,
-          dense: true,
-          contentPadding: EdgeInsets.zero,
-          onChanged: (v) => setState(() => _auctionEnabled = v),
-        ),
-        SwitchListTile(
-          title: const Text('Mortgages'),
-          value: _mortgageEnabled,
-          dense: true,
-          contentPadding: EdgeInsets.zero,
-          onChanged: (v) => setState(() => _mortgageEnabled = v),
-        ),
-        SwitchListTile(
-          title: const Text('Trading'),
-          value: _tradeEnabled,
-          dense: true,
-          contentPadding: EdgeInsets.zero,
-          onChanged: (v) => setState(() => _tradeEnabled = v),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildNetworkTab() {
-    return ListView(
-      children: [
-        TextField(
-          controller: _hostCtrl,
-          decoration: const InputDecoration(
-            labelText: 'Host',
-            isDense: true,
-          ),
-        ),
-        const SizedBox(height: 12),
-        TextField(
-          controller: _portCtrl,
-          decoration: const InputDecoration(
-            labelText: 'Port',
-            isDense: true,
-          ),
-          keyboardType: TextInputType.number,
-        ),
-        const SizedBox(height: 12),
-        SwitchListTile(
-          title: const Text('TLS'),
-          value: _tlsEnabled,
-          dense: true,
-          contentPadding: EdgeInsets.zero,
-          onChanged: (v) => setState(() => _tlsEnabled = v),
-        ),
-      ],
-    );
-  }
-}
-
-/// Pre-defined player colours matching BoardPainter
-const List<Color> _playerColors = [
-  Color(0xFFD32F2F),
-  Color(0xFF1976D2),
-  Color(0xFF388E3C),
-  Color(0xFFFBC02D),
-  Color(0xFF8E24AA),
-  Color(0xFFFF6F00),
-];
